@@ -46,51 +46,40 @@ static const char *sensitive_proc_files[] = {
 extern pid_t task_pid_nr(struct task_struct *task);
 extern pid_t task_tgid_nr(struct task_struct *task);
 
-// 检查是否是系统应用（通过进程名称判断，不应被拦截）
+// 获取当前进程名称的安全方法
+static void get_current_comm(char *buf, size_t size)
+{
+    // 使用内核提供的安全函数获取进程名
+    get_task_comm(buf, current);
+}
+
+// 检查是否是系统应用（通过PID和进程名判断，不应被拦截）
 static bool is_system_app(void)
 {
-    struct task_struct *task = current;
+    // 获取当前进程PID
+    pid_t pid = task_pid_nr(current);
     
-    if (!task) {
-        return false;
-    }
-    
-    // 没有mm说明是内核线程，认为是系统进程
-    if (!task->mm) {
-        return true; 
-    }
-    
-    // 检查常见的系统进程名称
-    if (strstr(task->comm, "system_server") ||    // Android系统服务
-        strstr(task->comm, "surfaceflinger") ||   // 显示服务
-        strstr(task->comm, "servicemanager") ||   // 服务管理器
-        strstr(task->comm, "init") ||             // init进程
-        strstr(task->comm, "kernel") ||           // 内核相关
-        strstr(task->comm, "kthread") ||          // 内核线程
-        strstr(task->comm, "migration") ||        // 迁移线程
-        strstr(task->comm, "rcu_") ||             // RCU线程
-        strstr(task->comm, "watchdog") ||         // 看门狗
-        strstr(task->comm, "ksoftirqd") ||        // 软中断
-        strstr(task->comm, "netd") ||             // 网络守护进程
-        strstr(task->comm, "installd") ||         // 安装守护进程
-        strstr(task->comm, "vold") ||             // 卷管理
-        strstr(task->comm, "drmserver") ||        // DRM服务
-        strstr(task->comm, "mediaserver") ||      // 媒体服务
-        strstr(task->comm, "cameraserver") ||     // 相机服务
-        strstr(task->comm, "audioserver") ||      // 音频服务
-        strstr(task->comm, "gatekeeperd") ||      // 网关守护进程
-        strstr(task->comm, "keystore") ||         // 密钥存储
-        strstr(task->comm, "healthd") ||          // 健康守护进程
-        strstr(task->comm, "logd") ||             // 日志守护进程
-        strstr(task->comm, "adbd") ||             // ADB守护进程
-        strstr(task->comm, "zygote") ||           // Zygote进程
-        strstr(task->comm, "app_process")) {      // 应用进程启动器
+    // 系统关键进程通常PID较小
+    if (pid <= 1000) {
         return true;
     }
     
-    // 检查PID范围 - 系统关键进程通常PID较小
-    pid_t pid = task->pid;
-    if (pid <= 1000) {
+    // 获取进程名称进行更精确的判断
+    char comm[TASK_COMM_LEN];
+    get_current_comm(comm, sizeof(comm));
+    
+    // 检查常见的系统进程名称
+    if (strstr(comm, "system_server") ||    // Android系统服务
+        strstr(comm, "surfaceflinger") ||   // 显示服务
+        strstr(comm, "servicemanager") ||   // 服务管理器
+        strstr(comm, "init") ||             // init进程
+        strstr(comm, "kernel") ||           // 内核相关
+        strstr(comm, "kthread") ||          // 内核线程
+        strstr(comm, "netd") ||             // 网络守护进程
+        strstr(comm, "installd") ||         // 安装守护进程
+        strstr(comm, "vold") ||             // 卷管理
+        strstr(comm, "zygote") ||           // Zygote进程
+        strstr(comm, "app_process")) {      // 应用进程启动器
         return true;
     }
     
@@ -222,15 +211,19 @@ void before_openat_0(hook_fargs4_t *args, void *udata)
     bool is_mount_detect = is_root_detection_mount_access(buf);
     
     if (enable_anti_detect && (is_sensitive || is_ptrace || is_mount_detect)) {
+        // 获取进程名用于日志
+        char comm[TASK_COMM_LEN];
+        get_current_comm(comm, sizeof(comm));
+        
         // 记录被拦截的访问
         if (is_sensitive) {
-            printk(KERN_INFO "[KP] BLOCKED sensitive proc file: pid:%d comm:%s filename:%s\n", pid, task->comm, buf);
+            printk(KERN_INFO "[KP] BLOCKED sensitive proc file: pid:%d tgid:%d comm:%s filename:%s\n", pid, tgid, comm, buf);
         }
         if (is_ptrace) {
-            printk(KERN_INFO "[KP] BLOCKED ptrace attempt: pid:%d comm:%s filename:%s\n", pid, task->comm, buf);
+            printk(KERN_INFO "[KP] BLOCKED ptrace attempt: pid:%d tgid:%d comm:%s filename:%s\n", pid, tgid, comm, buf);
         }
         if (is_mount_detect) {
-            printk(KERN_INFO "[KP] BLOCKED root detection (mount): pid:%d comm:%s filename:%s\n", pid, task->comm, buf);
+            printk(KERN_INFO "[KP] BLOCKED root detection (mount): pid:%d tgid:%d comm:%s filename:%s\n", pid, tgid, comm, buf);
         }
         // 对于敏感文件访问，我们只记录但不阻止（避免破坏系统功能）
         // 实际的阻止可以通过修改返回值在 after_openat 中实现
