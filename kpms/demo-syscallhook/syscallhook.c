@@ -16,6 +16,10 @@
 #include <linux/cred.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
+#include <linux/dcache.h>
+#include <linux/fs.h>
+#include <linux/mm.h>
 
 KPM_NAME("kpm-syscall-hook-demo");
 KPM_VERSION("1.0.0");
@@ -49,27 +53,65 @@ enum pid_type
 struct pid_namespace;
 pid_t (*__task_pid_nr_ns)(struct task_struct *task, enum pid_type type, struct pid_namespace *ns) = 0;
 
-// 检查是否是系统进程（不应被拦截）
-static bool is_system_process(pid_t pid)
+// 检查是否是系统应用（通过进程信息判断，不应被拦截）
+static bool is_system_app(void)
 {
-    // 系统关键进程PID范围（通常在1-1000之间）
-    if (pid <= 1000) {
-        return true;
+    struct task_struct *task = current;
+    struct mm_struct *mm;
+    struct file *exe_file;
+    char *pathname = NULL;
+    char *path_buf = NULL;
+    bool is_system = false;
+    
+    if (!task) {
+        return false;
     }
     
-    // 可以添加更多系统进程检查逻辑
-    return false;
+    mm = task->mm;
+    if (!mm) {
+        return true; // 内核线程，认为是系统进程
+    }
+    
+    exe_file = mm->exe_file;
+    if (!exe_file) {
+        return false;
+    }
+    
+    // 分配临时缓冲区获取路径
+    path_buf = kmalloc(256, GFP_ATOMIC);
+    if (!path_buf) {
+        return false;
+    }
+    
+    pathname = d_path(&exe_file->f_path, path_buf, 256);
+    if (IS_ERR(pathname)) {
+        kfree(path_buf);
+        return false;
+    }
+    
+    // 检查系统应用路径特征
+    if (strstr(pathname, "/system/") ||           // 系统分区
+        strstr(pathname, "/vendor/") ||           // 厂商分区  
+        strstr(pathname, "/apex/") ||             // APEX模块
+        strstr(pathname, "/system_ext/") ||       // 系统扩展
+        strstr(pathname, "/product/") ||          // 产品分区
+        strstr(pathname, "/odm/")) {              // ODM分区
+        is_system = true;
+    }
+    
+    kfree(path_buf);
+    return is_system;
 }
 
-// 检查是否是敏感的/proc文件（仅对非系统进程）
+// 检查是否是敏感的/proc文件（仅对非系统应用）
 static bool is_sensitive_proc_file(const char *filename, pid_t current_pid)
 {
     if (!filename || !enable_proc_filter || !enable_anti_detect) {
         return false;
     }
     
-    // 系统进程不拦截，避免系统崩溃
-    if (is_system_process(current_pid)) {
+    // 系统应用不拦截，避免系统崩溃
+    if (is_system_app()) {
         return false;
     }
     
@@ -107,8 +149,8 @@ static bool is_ptrace_call(const char *filename, pid_t current_pid)
         return false;
     }
     
-    // 系统进程不拦截
-    if (is_system_process(current_pid)) {
+    // 系统应用不拦截
+    if (is_system_app()) {
         return false;
     }
     
