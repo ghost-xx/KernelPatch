@@ -23,8 +23,7 @@ KPM_DESCRIPTION("KernelPatch Module System Call Hook Example");
 const char *margs = 0;
 enum hook_type hook_type = NONE;
 
-// 栈回溯配置（暂时禁用）
-static bool enable_stack_trace = false;
+// 移除栈回溯配置
 
 enum pid_type
 {
@@ -37,13 +36,7 @@ enum pid_type
 struct pid_namespace;
 pid_t (*__task_pid_nr_ns)(struct task_struct *task, enum pid_type type, struct pid_namespace *ns) = 0;
 
-// 简化的栈回溯函数（完全禁用，避免符号查找问题）
-static void do_stack_trace(pid_t pid)
-{
-    if (!enable_stack_trace) return;
-    
-    printk(KERN_INFO "[KP] Stack trace for pid:%d (disabled for compatibility)\n", pid);
-}
+// 移除栈回溯函数
 
 void before_openat_0(hook_fargs4_t *args, void *udata)
 {
@@ -63,9 +56,6 @@ void before_openat_0(hook_fargs4_t *args, void *udata)
     }
 
     args->local.data0 = (uint64_t)task;
-
-    // 执行栈回溯（如果启用）
-    do_stack_trace(pid);
 
     printk(KERN_INFO "[KP] hook_chain_0 task: %llx, pid: %d, tgid: %d, openat dfd: %d, filename: %s, flag: %x, mode: %d\n", task, pid,
             tgid, dfd, buf, flag, mode);
@@ -129,26 +119,15 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
     printk(KERN_INFO "[KP] syscall_hook control, args: %s\n", args ? args : "null");
     
     if (!args) {
-        printk(KERN_INFO "[KP] Available commands: enable_stack_trace, disable_stack_trace, status\n");
+        printk(KERN_INFO "[KP] Available commands: status\n");
         return 0;
     }
     
-    if (!strcmp("enable_stack_trace", args)) {
-        enable_stack_trace = true;
-        printk(KERN_INFO "[KP] Stack trace enabled (placeholder only)\n");
-        return 0;
-        
-    } else if (!strcmp("disable_stack_trace", args)) {
-        enable_stack_trace = false;
-        printk(KERN_INFO "[KP] Stack trace disabled\n");
-        return 0;
-        
-    } else if (!strcmp("status", args)) {
+    if (!strcmp("status", args)) {
         printk(KERN_INFO "[KP] === Current Status ===\n");
         printk(KERN_INFO "[KP] Hook type: %s\n", 
                (hook_type == FUNCTION_POINTER_CHAIN) ? "FUNCTION_POINTER" :
                (hook_type == INLINE_CHAIN) ? "INLINE" : "NONE");
-        printk(KERN_INFO "[KP] Stack trace: %s\n", enable_stack_trace ? "ENABLED" : "DISABLED");
         printk(KERN_INFO "[KP] Open counts: %llu\n", open_counts);
         return 0;
         
