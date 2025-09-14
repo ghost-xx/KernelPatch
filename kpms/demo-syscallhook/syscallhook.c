@@ -53,48 +53,76 @@ static void get_current_comm(char *buf, size_t size)
     get_task_comm(buf, current);
 }
 
-// 检查是否是系统应用（通过PID和进程名判断，不应被拦截）
-static bool is_system_app(void)
+// 检查是否是系统应用（通过钩子参数中的进程信息判断，不应被拦截）
+static bool is_system_app_by_hook_info(pid_t pid, pid_t tgid, const char *comm)
 {
-    // 获取当前进程PID
-    pid_t pid = task_pid_nr(current);
-    
-    // 系统关键进程通常PID较小
+    // 1. 系统关键进程通常PID较小
     if (pid <= 1000) {
         return true;
     }
     
-    // 获取进程名称进行更精确的判断
-    char comm[TASK_COMM_LEN];
-    get_current_comm(comm, sizeof(comm));
+    // 2. 内核线程检查 (通常TGID为0或与PID不同)
+    if (tgid == 0 || pid == tgid) {
+        // 进一步检查是否是内核线程
+        if (pid <= 2 || strstr(comm, "kthread") || strstr(comm, "migration") || 
+            strstr(comm, "rcu_") || strstr(comm, "watchdog") || strstr(comm, "ksoftirqd")) {
+            return true;
+        }
+    }
     
-    // 检查常见的系统进程名称
+    // 3. 检查Android系统进程名称
     if (strstr(comm, "system_server") ||    // Android系统服务
-        strstr(comm, "surfaceflinger") ||   // 显示服务
+        strstr(comm, "surfaceflinger") ||   // 显示服务  
         strstr(comm, "servicemanager") ||   // 服务管理器
         strstr(comm, "init") ||             // init进程
-        strstr(comm, "kernel") ||           // 内核相关
-        strstr(comm, "kthread") ||          // 内核线程
         strstr(comm, "netd") ||             // 网络守护进程
         strstr(comm, "installd") ||         // 安装守护进程
         strstr(comm, "vold") ||             // 卷管理
+        strstr(comm, "drmserver") ||        // DRM服务
+        strstr(comm, "mediaserver") ||      // 媒体服务
+        strstr(comm, "cameraserver") ||     // 相机服务
+        strstr(comm, "audioserver") ||      // 音频服务
+        strstr(comm, "gatekeeperd") ||      // 网关守护进程
+        strstr(comm, "keystore") ||         // 密钥存储
+        strstr(comm, "healthd") ||          // 健康守护进程
+        strstr(comm, "logd") ||             // 日志守护进程
+        strstr(comm, "adbd") ||             // ADB守护进程
         strstr(comm, "zygote") ||           // Zygote进程
         strstr(comm, "app_process")) {      // 应用进程启动器
+        return true;
+    }
+    
+    // 4. 检查系统包名特征 (Android系统应用通常以这些开头)
+    if (strstr(comm, "com.android.") ||     // Android系统包
+        strstr(comm, "android.") ||         // Android框架
+        strstr(comm, "com.google.android.") || // Google系统包
+        (strlen(comm) < 10 && !strstr(comm, "."))) { // 短名称通常是系统进程
         return true;
     }
     
     return false;
 }
 
+// 简化版本，用于不需要详细信息的场合
+static bool is_system_app(void)
+{
+    pid_t pid = task_pid_nr(current);
+    pid_t tgid = task_tgid_nr(current);
+    char comm[TASK_COMM_LEN];
+    get_current_comm(comm, sizeof(comm));
+    
+    return is_system_app_by_hook_info(pid, tgid, comm);
+}
+
 // 检查是否是Root检测相关的挂载文件访问
-static bool is_root_detection_mount_access(const char *filename)
+static bool is_root_detection_mount_access(const char *filename, pid_t pid, pid_t tgid, const char *comm)
 {
     if (!filename || !enable_mount_hide || !enable_anti_detect) {
         return false;
     }
     
     // 系统应用不拦截
-    if (is_system_app()) {
+    if (is_system_app_by_hook_info(pid, tgid, comm)) {
         return false;
     }
     
@@ -119,14 +147,14 @@ static bool is_root_detection_mount_access(const char *filename)
 }
 
 // 检查是否是敏感的/proc文件（仅对非系统应用）
-static bool is_sensitive_proc_file(const char *filename, pid_t current_pid)
+static bool is_sensitive_proc_file(const char *filename, pid_t pid, pid_t tgid, const char *comm)
 {
     if (!filename || !enable_proc_filter || !enable_anti_detect) {
         return false;
     }
     
     // 系统应用不拦截，避免系统崩溃
-    if (is_system_app()) {
+    if (is_system_app_by_hook_info(pid, tgid, comm)) {
         return false;
     }
     
@@ -158,14 +186,14 @@ static bool is_sensitive_proc_file(const char *filename, pid_t current_pid)
 }
 
 // 检查是否是ptrace相关调用
-static bool is_ptrace_call(const char *filename, pid_t current_pid)
+static bool is_ptrace_call(const char *filename, pid_t pid, pid_t tgid, const char *comm)
 {
     if (!filename || !enable_ptrace_hide || !enable_anti_detect) {
         return false;
     }
     
     // 系统应用不拦截
-    if (is_system_app()) {
+    if (is_system_app_by_hook_info(pid, tgid, comm)) {
         return false;
     }
     
@@ -205,15 +233,19 @@ void before_openat_0(hook_fargs4_t *args, void *udata)
 
     args->local.data0 = (uint64_t)task;
 
-    // 反检测逻辑
-    bool is_sensitive = is_sensitive_proc_file(buf, pid);
-    bool is_ptrace = is_ptrace_call(buf, pid);
-    bool is_mount_detect = is_root_detection_mount_access(buf);
+    // 获取进程名用于系统应用检测和日志
+    char comm[TASK_COMM_LEN];
+    get_current_comm(comm, sizeof(comm));
+    
+    // 反检测逻辑 - 使用钩子中的完整进程信息进行精确判断
+    bool is_sensitive = is_sensitive_proc_file(buf, pid, tgid, comm);
+    bool is_ptrace = is_ptrace_call(buf, pid, tgid, comm);
+    bool is_mount_detect = is_root_detection_mount_access(buf, pid, tgid, comm);
+    
+    // 检查是否是系统应用（用于调试和日志）
+    bool is_sys_app = is_system_app_by_hook_info(pid, tgid, comm);
     
     if (enable_anti_detect && (is_sensitive || is_ptrace || is_mount_detect)) {
-        // 获取进程名用于日志
-        char comm[TASK_COMM_LEN];
-        get_current_comm(comm, sizeof(comm));
         
         // 记录被拦截的访问
         if (is_sensitive) {
@@ -231,9 +263,9 @@ void before_openat_0(hook_fargs4_t *args, void *udata)
         return;  // 不记录敏感操作的详细日志
     }
 
-    // 正常日志记录
-    printk(KERN_INFO "[KP] pid:%d tgid:%d task:%llx openat dfd:%d filename:%s flag:%x mode:%d\n", 
-           pid, tgid, task, dfd, buf, flag, mode);
+    // 正常日志记录（显示是否为系统应用）
+    printk(KERN_INFO "[KP] pid:%d tgid:%d comm:%s%s openat dfd:%d filename:%s flag:%x mode:%d\n", 
+           pid, tgid, comm, is_sys_app ? " (system)" : "", dfd, buf, flag, mode);
 }
 
 uint64_t open_counts = 0;
