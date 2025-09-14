@@ -170,12 +170,13 @@ static long syscall_hook_demo_init(const char *args, const char *event, void *__
     // KernelPatch栈回溯API总是可用的
     printk(KERN_INFO "[KP] KernelPatch stack trace API available\n");
 
-    if (!margs) {
-        printk(KERN_WARNING "[KP] no args specified, skip hook\n");
-        return 0;
-    }
-
     hook_err_t err = HOOK_NO_ERR;
+
+    if (!margs) {
+        printk(KERN_INFO "[KP] no args specified, module loaded without hooks\n");
+        printk(KERN_INFO "[KP] use kptools -c to install hooks dynamically\n");
+        return 0;  // 成功加载，但没有安装hook
+    }
 
     if (!strcmp("function_pointer_hook", margs)) {
         printk(KERN_INFO "[KP] function pointer hook enabled\n");
@@ -188,13 +189,39 @@ static long syscall_hook_demo_init(const char *args, const char *event, void *__
         hook_type = INLINE_CHAIN;
         err = inline_hook_syscalln(__NR_openat, 4, before_openat_0, 0, 0);
     } else {
-        printk(KERN_WARNING "[KP] unknown args:%s\n", margs);
-        return 0;
+        printk(KERN_WARNING "[KP] unknown args:%s, module loaded without hooks\n", margs);
+        printk(KERN_INFO "[KP] use kptools -c to install hooks dynamically\n");
+        return 0;  // 成功加载，但没有安装hook
     }
 
 out:
     if (err) {
         printk(KERN_ERR "[KP] hook openat error:%d\n", err);
+        // 详细的错误信息
+        switch(err) {
+            case HOOK_BAD_ADDRESS:
+                printk(KERN_ERR "[KP] Error: Bad hook address\n");
+                break;
+            case HOOK_DUPLICATED:
+                printk(KERN_ERR "[KP] Error: Hook already exists\n");
+                break;
+            case HOOK_NO_MEM:
+                printk(KERN_ERR "[KP] Error: No memory available\n");
+                break;
+            case HOOK_BAD_RELO:
+                printk(KERN_ERR "[KP] Error: Bad relocation\n");
+                break;
+            case HOOK_TRANSIT_NO_MEM:
+                printk(KERN_ERR "[KP] Error: Transit no memory\n");
+                break;
+            case HOOK_CHAIN_FULL:
+                printk(KERN_ERR "[KP] Error: Hook chain is full\n");
+                break;
+            default:
+                printk(KERN_ERR "[KP] Error: Unknown hook error %d\n", err);
+                break;
+        }
+        return -1;  // 返回错误状态
     } else {
         printk(KERN_INFO "[KP] hook openat success\n");
         // 显示当前状态
