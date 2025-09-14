@@ -115,11 +115,53 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
     printk(KERN_INFO "[KP] syscall_hook control, args: %s\n", args ? args : "null");
     
     if (!args) {
-        printk(KERN_INFO "[KP] Available commands: status\n");
+        printk(KERN_INFO "[KP] Available commands: function_pointer_hook, inline_hook, unhook, status\n");
         return 0;
     }
     
-    if (!strcmp("status", args)) {
+    hook_err_t err = HOOK_NO_ERR;
+    
+    if (!strcmp("function_pointer_hook", args)) {
+        // 先清理现有hook
+        if (hook_type == INLINE_CHAIN) {
+            inline_unhook_syscalln(__NR_openat, before_openat_0, 0);
+        } else if (hook_type == FUNCTION_POINTER_CHAIN) {
+            fp_unhook_syscalln(__NR_openat, before_openat_0, 0);
+            fp_unhook_syscalln(__NR_openat, before_openat_1, after_openat_1);
+        }
+        
+        printk(KERN_INFO "[KP] Installing function pointer hook...\n");
+        hook_type = FUNCTION_POINTER_CHAIN;
+        err = fp_hook_syscalln(__NR_openat, 4, before_openat_0, 0, 0);
+        if (err) goto out;
+        err = fp_hook_syscalln(__NR_openat, 4, before_openat_1, after_openat_1, &open_counts);
+        
+    } else if (!strcmp("inline_hook", args)) {
+        // 先清理现有hook
+        if (hook_type == INLINE_CHAIN) {
+            inline_unhook_syscalln(__NR_openat, before_openat_0, 0);
+        } else if (hook_type == FUNCTION_POINTER_CHAIN) {
+            fp_unhook_syscalln(__NR_openat, before_openat_0, 0);
+            fp_unhook_syscalln(__NR_openat, before_openat_1, after_openat_1);
+        }
+        
+        printk(KERN_INFO "[KP] Installing inline hook...\n");
+        hook_type = INLINE_CHAIN;
+        err = inline_hook_syscalln(__NR_openat, 4, before_openat_0, 0, 0);
+        
+    } else if (!strcmp("unhook", args)) {
+        printk(KERN_INFO "[KP] Removing all hooks...\n");
+        if (hook_type == INLINE_CHAIN) {
+            inline_unhook_syscalln(__NR_openat, before_openat_0, 0);
+        } else if (hook_type == FUNCTION_POINTER_CHAIN) {
+            fp_unhook_syscalln(__NR_openat, before_openat_0, 0);
+            fp_unhook_syscalln(__NR_openat, before_openat_1, after_openat_1);
+        }
+        hook_type = NONE;
+        printk(KERN_INFO "[KP] All hooks removed\n");
+        return 0;
+        
+    } else if (!strcmp("status", args)) {
         printk(KERN_INFO "[KP] === Current Status ===\n");
         printk(KERN_INFO "[KP] Hook type: %s\n", 
                (hook_type == FUNCTION_POINTER_CHAIN) ? "FUNCTION_POINTER" :
@@ -131,6 +173,15 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
         printk(KERN_WARNING "[KP] Unknown command: %s\n", args);
         return -1;
     }
+
+out:
+    if (err) {
+        printk(KERN_ERR "[KP] Hook operation error: %d\n", err);
+        return -1;
+    } else {
+        printk(KERN_INFO "[KP] Hook operation success\n");
+    }
+    return 0;
 }
 
 static long syscall_hook_demo_exit(void *__user reserved)
