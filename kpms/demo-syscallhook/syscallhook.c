@@ -15,6 +15,7 @@
 #include <asm/current.h>
 #include <linux/cred.h>
 #include <linux/errno.h>
+#include <linux/kernel.h>
 
 KPM_NAME("kpm-syscall-hook-demo");
 KPM_VERSION("1.0.0");
@@ -48,10 +49,27 @@ enum pid_type
 struct pid_namespace;
 pid_t (*__task_pid_nr_ns)(struct task_struct *task, enum pid_type type, struct pid_namespace *ns) = 0;
 
-// 检查是否是敏感的/proc文件
-static bool is_sensitive_proc_file(const char *filename)
+// 检查是否是系统进程（不应被拦截）
+static bool is_system_process(pid_t pid)
+{
+    // 系统关键进程PID范围（通常在1-1000之间）
+    if (pid <= 1000) {
+        return true;
+    }
+    
+    // 可以添加更多系统进程检查逻辑
+    return false;
+}
+
+// 检查是否是敏感的/proc文件（仅对非系统进程）
+static bool is_sensitive_proc_file(const char *filename, pid_t current_pid)
 {
     if (!filename || !enable_proc_filter || !enable_anti_detect) {
+        return false;
+    }
+    
+    // 系统进程不拦截，避免系统崩溃
+    if (is_system_process(current_pid)) {
         return false;
     }
     
@@ -60,37 +78,57 @@ static bool is_sensitive_proc_file(const char *filename)
         return false;
     }
     
-    // 检查敏感文件列表
-    const char **file = sensitive_proc_files;
-    while (*file) {
-        if (strstr(filename, *file)) {
+    // 只拦截访问其他进程信息的敏感文件
+    // 允许访问自己的/proc信息，但拦截访问其他进程的信息
+    if (strstr(filename, "maps") || 
+        strstr(filename, "smaps") ||
+        strstr(filename, "status") ||
+        strstr(filename, "stat") ||
+        strstr(filename, "cmdline") ||
+        strstr(filename, "environ")) {
+        
+        // 检查是否是访问其他进程的信息
+        char pid_str[16];
+        snprintf(pid_str, sizeof(pid_str), "/proc/%d/", current_pid);
+        
+        // 如果不是访问自己的信息，则认为是敏感访问
+        if (!strstr(filename, pid_str)) {
             return true;
         }
-        file++;
-    }
-    
-    // 检查是否访问其他进程的信息
-    if (strstr(filename, "/proc/") && strstr(filename, "/")) {
-        return true;
     }
     
     return false;
 }
 
 // 检查是否是ptrace相关调用
-static bool is_ptrace_call(const char *filename)
+static bool is_ptrace_call(const char *filename, pid_t current_pid)
 {
     if (!filename || !enable_ptrace_hide || !enable_anti_detect) {
         return false;
     }
-    // 检查ptrace相关文件
+    
+    // 系统进程不拦截
+    if (is_system_process(current_pid)) {
+        return false;
+    }
+    
+    // 检查ptrace相关文件，但只拦截跨进程访问
     if (strstr(filename, "/proc/") && (
         strstr(filename, "status") || 
         strstr(filename, "stat") ||
         strstr(filename, "task") ||
         strstr(filename, "mem"))) {
-        return true;
+        
+        // 检查是否是访问其他进程
+        char pid_str[16];
+        snprintf(pid_str, sizeof(pid_str), "/proc/%d/", current_pid);
+        
+        // 如果不是访问自己的信息，则认为是ptrace尝试
+        if (!strstr(filename, pid_str)) {
+            return true;
+        }
     }
+    
     return false;
 }
 
@@ -115,19 +153,17 @@ void before_openat_0(hook_fargs4_t *args, void *udata)
     args->local.data0 = (uint64_t)task;
 
     // 反检测逻辑
-    bool is_sensitive = is_sensitive_proc_file(buf);
-    bool is_ptrace = is_ptrace_call(buf);
+    bool is_sensitive = is_sensitive_proc_file(buf, pid);
+    bool is_ptrace = is_ptrace_call(buf, pid);
     
     if (enable_anti_detect && (is_sensitive || is_ptrace)) {
         // 记录被拦截的访问
         if (is_sensitive) {
             printk(KERN_INFO "[KP] BLOCKED sensitive proc file: pid:%d filename:%s\n", pid, buf);
         }
-        
         if (is_ptrace) {
             printk(KERN_INFO "[KP] BLOCKED ptrace attempt: pid:%d filename:%s\n", pid, buf);
         }
-        
         // 对于敏感文件访问，我们只记录但不阻止（避免破坏系统功能）
         // 实际的阻止可以通过修改返回值在 after_openat 中实现
         args->local.data1 = 1;  // 标记这是一个敏感访问
