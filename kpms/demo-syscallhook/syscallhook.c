@@ -46,16 +46,23 @@ void before_openat_0(hook_fargs4_t *args, void *udata)
 
     struct task_struct *task = current;
     pid_t pid = -1, tgid = -1;
+    uid_t uid = -1;
+    
     if (__task_pid_nr_ns) {
         pid = __task_pid_nr_ns(task, PIDTYPE_PID, 0);
         tgid = __task_pid_nr_ns(task, PIDTYPE_TGID, 0);
     }
+    
+    // 获取UID
+    if (task && task->cred) {
+        uid = task->cred->uid.val;
+    }
 
     args->local.data0 = (uint64_t)task;
 
-    // PID开头的日志格式，便于dmesg过滤
-    printk(KERN_INFO "[KP] pid:%d tgid:%d task:%llx openat dfd:%d filename:%s flag:%x mode:%d\n", 
-           pid, tgid, task, dfd, buf, flag, mode);
+    // 添加UID的日志格式，便于dmesg过滤
+    printk(KERN_INFO "[KP] pid:%d tgid:%d uid:%d task:%llx openat dfd:%d filename:%s flag:%x mode:%d\n", 
+           pid, tgid, uid, task, dfd, buf, flag, mode);
 }
 
 uint64_t open_counts = 0;
