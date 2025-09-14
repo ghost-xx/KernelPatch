@@ -46,59 +46,37 @@ static const char *sensitive_proc_files[] = {
 extern pid_t task_pid_nr(struct task_struct *task);
 extern pid_t task_tgid_nr(struct task_struct *task);
 
-// 获取当前进程名称的安全方法
+// 获取当前进程名称的简化方法 - 最大兼容性
 static void get_current_comm(char *buf, size_t size)
 {
-    // 使用内核提供的安全函数获取进程名
-    get_task_comm(buf, current);
+    // 简化方案：直接使用PID作为标识，避免复杂的进程名获取
+    if (size > 0) {
+        pid_t pid = task_pid_nr(current);
+        snprintf(buf, size, "pid_%d", pid);
+    }
 }
 
-// 检查是否是系统应用（通过钩子参数中的进程信息判断，不应被拦截）
+// 检查是否是系统应用（简化版本，主要基于PID判断）
 static bool is_system_app_by_hook_info(pid_t pid, pid_t tgid, const char *comm)
 {
-    // 1. 系统关键进程通常PID较小
+    // 1. 系统关键进程通常PID较小 - 这是最可靠的判断方法
     if (pid <= 1000) {
         return true;
     }
     
-    // 2. 内核线程检查 (通常TGID为0或与PID不同)
-    if (tgid == 0 || pid == tgid) {
-        // 进一步检查是否是内核线程
-        if (pid <= 2 || strstr(comm, "kthread") || strstr(comm, "migration") || 
-            strstr(comm, "rcu_") || strstr(comm, "watchdog") || strstr(comm, "ksoftirqd")) {
-            return true;
-        }
-    }
-    
-    // 3. 检查Android系统进程名称
-    if (strstr(comm, "system_server") ||    // Android系统服务
-        strstr(comm, "surfaceflinger") ||   // 显示服务  
-        strstr(comm, "servicemanager") ||   // 服务管理器
-        strstr(comm, "init") ||             // init进程
-        strstr(comm, "netd") ||             // 网络守护进程
-        strstr(comm, "installd") ||         // 安装守护进程
-        strstr(comm, "vold") ||             // 卷管理
-        strstr(comm, "drmserver") ||        // DRM服务
-        strstr(comm, "mediaserver") ||      // 媒体服务
-        strstr(comm, "cameraserver") ||     // 相机服务
-        strstr(comm, "audioserver") ||      // 音频服务
-        strstr(comm, "gatekeeperd") ||      // 网关守护进程
-        strstr(comm, "keystore") ||         // 密钥存储
-        strstr(comm, "healthd") ||          // 健康守护进程
-        strstr(comm, "logd") ||             // 日志守护进程
-        strstr(comm, "adbd") ||             // ADB守护进程
-        strstr(comm, "zygote") ||           // Zygote进程
-        strstr(comm, "app_process")) {      // 应用进程启动器
+    // 2. 内核线程检查 (TGID为0通常表示内核线程)
+    if (tgid == 0) {
         return true;
     }
     
-    // 4. 检查系统包名特征 (Android系统应用通常以这些开头)
-    if (strstr(comm, "com.android.") ||     // Android系统包
-        strstr(comm, "android.") ||         // Android框架
-        strstr(comm, "com.google.android.") || // Google系统包
-        (strlen(comm) < 10 && !strstr(comm, "."))) { // 短名称通常是系统进程
+    // 3. 对于Android系统，还可以基于PID范围进行更精确的判断
+    // Android系统服务通常在1000-2000范围内
+    if (pid >= 1000 && pid <= 2000) {
         return true;
     }
+    
+    // 4. 如果comm包含PID信息，可以进行一些基本的判断
+    // 但为了最大兼容性，我们主要依赖PID范围
     
     return false;
 }
@@ -174,7 +152,7 @@ static bool is_sensitive_proc_file(const char *filename, pid_t pid, pid_t tgid, 
         
         // 检查是否是访问其他进程的信息
         char pid_str[16];
-        snprintf(pid_str, sizeof(pid_str), "/proc/%d/", current_pid);
+        snprintf(pid_str, sizeof(pid_str), "/proc/%d/", pid);
         
         // 如果不是访问自己的信息，则认为是敏感访问
         if (!strstr(filename, pid_str)) {
@@ -206,7 +184,7 @@ static bool is_ptrace_call(const char *filename, pid_t pid, pid_t tgid, const ch
         
         // 检查是否是访问其他进程
         char pid_str[16];
-        snprintf(pid_str, sizeof(pid_str), "/proc/%d/", current_pid);
+        snprintf(pid_str, sizeof(pid_str), "/proc/%d/", pid);
         
         // 如果不是访问自己的信息，则认为是ptrace尝试
         if (!strstr(filename, pid_str)) {
@@ -467,7 +445,7 @@ out_control:
             printk(KERN_INFO "[KP] - Proc filter: %s\n", enable_proc_filter ? "ENABLED" : "DISABLED");
             printk(KERN_INFO "[KP] - Ptrace hiding: %s\n", enable_ptrace_hide ? "ENABLED" : "DISABLED");
         }
-        return 0;
+    return 0;
     }
 }
 
