@@ -197,10 +197,8 @@ out:
         printk(KERN_ERR "[KP] hook openat error:%d\n", err);
     } else {
         printk(KERN_INFO "[KP] hook openat success\n");
-        // 显示反检测状态
-        printk(KERN_INFO "[KP] Anti-detection features: %s\n", enable_anti_detect ? "ENABLED" : "DISABLED");
-        printk(KERN_INFO "[KP] - Proc filter: %s\n", enable_proc_filter ? "ENABLED" : "DISABLED");
-        printk(KERN_INFO "[KP] - Ptrace hiding: %s\n", enable_ptrace_hide ? "ENABLED" : "DISABLED");
+        // 显示当前状态
+        printk(KERN_INFO "[KP] Stack trace: %s\n", enable_stack_trace ? "ENABLED" : "DISABLED");
     }
     return 0;
 }
@@ -294,14 +292,10 @@ out_control:
         return -1;
     } else {
         printk(KERN_INFO "[KP] control: hook success\n");
-        // 显示反检测状态
-        printk(KERN_INFO "[KP] Anti-detection features: %s\n", enable_anti_detect ? "ENABLED" : "DISABLED");
-        if (enable_anti_detect) {
-            printk(KERN_INFO "[KP] - Proc filter: %s\n", enable_proc_filter ? "ENABLED" : "DISABLED");
-            printk(KERN_INFO "[KP] - Ptrace hiding: %s\n", enable_ptrace_hide ? "ENABLED" : "DISABLED");
-        }
-    return 0;
+        // 显示当前状态
+        printk(KERN_INFO "[KP] Stack trace: %s\n", enable_stack_trace ? "ENABLED" : "DISABLED");
     }
+    return 0;
 }
 
 static long syscall_hook_demo_exit(void *__user reserved)
