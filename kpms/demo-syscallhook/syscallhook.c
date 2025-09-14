@@ -15,11 +15,12 @@
 #include <asm/current.h>
 #include <linux/sched.h>
 #include <linux/sched/task.h>
+#include <linux/kernel.h>
 
 KPM_NAME("kpm-syscall-hook-demo");
 KPM_VERSION("1.0.0");
 KPM_LICENSE("GPL v2");
-KPM_AUTHOR("bmax121");
+KPM_AUTHOR("GHOSTXX");
 KPM_DESCRIPTION("KernelPatch Module System Call Hook Example");
 
 const char *margs = 0;
@@ -30,16 +31,7 @@ static pid_t target_pid = 0;      // 目标进程PID (0表示不过滤)
 static pid_t target_tgid = 0;     // 目标线程组PID (0表示不过滤)
 static bool pid_filter_enabled = false; // 是否启用PID过滤
 
-enum pid_type
-{
-    PIDTYPE_PID,
-    PIDTYPE_TGID,
-    PIDTYPE_PGID,
-    PIDTYPE_SID,
-    PIDTYPE_MAX,
-};
-struct pid_namespace;
-pid_t (*__task_pid_nr_ns)(struct task_struct *task, enum pid_type type, struct pid_namespace *ns) = 0;
+// 这些定义已经在 linux/sched.h 中存在，不需要重复定义
 
 void before_openat_0(hook_fargs4_t *args, void *udata)
 {
@@ -53,10 +45,10 @@ void before_openat_0(hook_fargs4_t *args, void *udata)
 
     struct task_struct *task = current;
     pid_t pid = -1, tgid = -1;
-    if (__task_pid_nr_ns) {
-        pid = __task_pid_nr_ns(task, PIDTYPE_PID, 0);
-        tgid = __task_pid_nr_ns(task, PIDTYPE_TGID, 0);
-    }
+    
+    // 使用内核提供的函数获取PID和TGID
+    pid = __task_pid_nr_ns(task, PIDTYPE_PID, 0);
+    tgid = __task_pid_nr_ns(task, PIDTYPE_TGID, 0);
 
     args->local.data0 = (uint64_t)task;
 
@@ -122,8 +114,8 @@ static long syscall_hook_demo_init(const char *args, const char *event, void *__
     margs = args;
     printk(KERN_INFO "[KP] kpm-syscall-hook-demo init ..., args: %s\n", margs);
 
-    __task_pid_nr_ns = (typeof(__task_pid_nr_ns))kallsyms_lookup_name("__task_pid_nr_ns");
-    printk(KERN_INFO "[KP] kernel function __task_pid_nr_ns addr: %llx\n", __task_pid_nr_ns);
+    // __task_pid_nr_ns 函数已经通过头文件可用，不需要动态查找
+    printk(KERN_INFO "[KP] kernel function __task_pid_nr_ns available via headers\n");
 
     if (!margs) {
         printk(KERN_WARNING "[KP] no args specified, skip hook\n");
