@@ -14,6 +14,7 @@
 #include <kputils.h>
 #include <asm/current.h>
 #include <linux/cred.h>
+#include <linux/errno.h>
 
 KPM_NAME("kpm-syscall-hook-demo");
 KPM_VERSION("1.0.0");
@@ -82,7 +83,6 @@ static bool is_ptrace_call(const char *filename)
     if (!filename || !enable_ptrace_hide || !enable_anti_detect) {
         return false;
     }
-    
     // 检查ptrace相关文件
     if (strstr(filename, "/proc/") && (
         strstr(filename, "status") || 
@@ -91,7 +91,6 @@ static bool is_ptrace_call(const char *filename)
         strstr(filename, "mem"))) {
         return true;
     }
-    
     return false;
 }
 
@@ -120,18 +119,18 @@ void before_openat_0(hook_fargs4_t *args, void *udata)
     bool is_ptrace = is_ptrace_call(buf);
     
     if (enable_anti_detect && (is_sensitive || is_ptrace)) {
-        // 对敏感文件访问返回错误
+        // 记录被拦截的访问
         if (is_sensitive) {
             printk(KERN_INFO "[KP] BLOCKED sensitive proc file: pid:%d filename:%s\n", pid, buf);
-            // 修改返回值为 ENOENT (文件不存在)
-            syscall_argn(args, 1) = (uint64_t)"/dev/null";  // 重定向到安全文件
         }
         
         if (is_ptrace) {
             printk(KERN_INFO "[KP] BLOCKED ptrace attempt: pid:%d filename:%s\n", pid, buf);
-            // 对ptrace相关访问也进行重定向
-            syscall_argn(args, 1) = (uint64_t)"/dev/zero";
         }
+        
+        // 对于敏感文件访问，我们只记录但不阻止（避免破坏系统功能）
+        // 实际的阻止可以通过修改返回值在 after_openat 中实现
+        args->local.data1 = 1;  // 标记这是一个敏感访问
         return;  // 不记录敏感操作的详细日志
     }
 
@@ -151,7 +150,14 @@ void before_openat_1(hook_fargs4_t *args, void *udata)
 
 void after_openat_1(hook_fargs4_t *args, void *udata)
 {
-    printk(KERN_INFO "[KP] hook_chain_1 after openat task:%llx\n", args->local.data0);
+    // 检查是否是被标记的敏感访问
+    if (args->local.data1 == 1 && enable_anti_detect) {
+        // 对于敏感文件访问，修改返回值为错误
+        args->ret = -ENOENT;  // 文件不存在错误
+        printk(KERN_INFO "[KP] Modified return value for sensitive access: task:%llx ret:-ENOENT\n", args->local.data0);
+    } else {
+        printk(KERN_INFO "[KP] hook_chain_1 after openat task:%llx\n", args->local.data0);
+    }
 }
 
 static long syscall_hook_demo_init(const char *args, const char *event, void *__user reserved)
