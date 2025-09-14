@@ -1,8 +1,29 @@
 name: Build CI
 
 on:
-  workflow_call:
+  # 自动触发编译的条件
+  push:
+    branches: [ main, master, develop ]  # 在主要分支推送时触发
+    tags: [ 'v*' ]  # 在版本标签推送时触发
+    paths:  # 只在相关文件改变时触发
+      - 'kernel/**'
+      - 'kpms/**'
+      - 'tools/**'
+      - 'user/**'
+      - 'version'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches: [ main, master ]  # 在拉取请求时触发
+    paths:  # 只在相关文件改变时触发
+      - 'kernel/**'
+      - 'kpms/**'
+      - 'tools/**'
+      - 'user/**'
+      - 'version'
+      - '.github/workflows/build.yml'
+  # 保留手动触发选项
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   Build-kpimg:
