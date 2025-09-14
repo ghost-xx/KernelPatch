@@ -113,7 +113,70 @@ out:
 static long syscall_hook_control0(const char *args, char *__user out_msg, int outlen)
 {
     printk(KERN_INFO "[KP] syscall_hook control, args: %s\n", args);
-    return 0;
+    
+    if (!args) {
+        printk(KERN_WARNING "[KP] control: no args specified\n");
+        return -1;
+    }
+    
+    hook_err_t err = HOOK_NO_ERR;
+    
+    if (!strcmp("function_pointer_hook", args)) {
+        printk(KERN_INFO "[KP] control: setting up function pointer hook ...\n");
+        
+        // 如果已经有钩子，先清理
+        if (hook_type == FUNCTION_POINTER_CHAIN) {
+            fp_unhook_syscalln(__NR_openat, before_openat_0, 0);
+            fp_unhook_syscalln(__NR_openat, before_openat_1, after_openat_1);
+        } else if (hook_type == INLINE_CHAIN) {
+            inline_unhook_syscalln(__NR_openat, before_openat_0, 0);
+        }
+        
+        hook_type = FUNCTION_POINTER_CHAIN;
+        err = fp_hook_syscalln(__NR_openat, 4, before_openat_0, 0, 0);
+        if (err) goto out_control;
+        err = fp_hook_syscalln(__NR_openat, 4, before_openat_1, after_openat_1, &open_counts);
+        
+    } else if (!strcmp("inline_hook", args)) {
+        printk(KERN_INFO "[KP] control: setting up inline hook ...\n");
+        
+        // 如果已经有钩子，先清理
+        if (hook_type == FUNCTION_POINTER_CHAIN) {
+            fp_unhook_syscalln(__NR_openat, before_openat_0, 0);
+            fp_unhook_syscalln(__NR_openat, before_openat_1, after_openat_1);
+        } else if (hook_type == INLINE_CHAIN) {
+            inline_unhook_syscalln(__NR_openat, before_openat_0, 0);
+        }
+        
+        hook_type = INLINE_CHAIN;
+        err = inline_hook_syscalln(__NR_openat, 4, before_openat_0, 0, 0);
+        
+    } else if (!strcmp("unhook", args)) {
+        printk(KERN_INFO "[KP] control: removing hooks ...\n");
+        
+        if (hook_type == FUNCTION_POINTER_CHAIN) {
+            fp_unhook_syscalln(__NR_openat, before_openat_0, 0);
+            fp_unhook_syscalln(__NR_openat, before_openat_1, after_openat_1);
+        } else if (hook_type == INLINE_CHAIN) {
+            inline_unhook_syscalln(__NR_openat, before_openat_0, 0);
+        }
+        hook_type = NONE;
+        printk(KERN_INFO "[KP] control: hooks removed\n");
+        return 0;
+        
+    } else {
+        printk(KERN_WARNING "[KP] control: unknown args: %s\n", args);
+        return -1;
+    }
+
+out_control:
+    if (err) {
+        printk(KERN_ERR "[KP] control: hook openat error: %d\n", err);
+        return -1;
+    } else {
+        printk(KERN_INFO "[KP] control: hook openat success\n");
+        return 0;
+    }
 }
 
 static long syscall_hook_demo_exit(void *__user reserved)
