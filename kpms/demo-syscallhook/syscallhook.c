@@ -13,6 +13,7 @@
 #include <linux/string.h>
 #include <kputils.h>
 #include <asm/current.h>
+#include <linux/sched.h>
 
 KPM_NAME("kpm-syscall-hook-demo");
 KPM_VERSION("1.0.0");
