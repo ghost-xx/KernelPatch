@@ -179,16 +179,23 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
     // 单一职责命令 - 每个命令只做一件事
     if (!strcmp("hook_openat_fp", args)) {
         printk(KERN_INFO "[KP] Installing openat function pointer hook...\n");
+        // 先尝试移除可能存在的旧hook，避免重复安装
+        fp_unhook_syscalln(__NR_openat, before_openat_0, 0);
+        fp_unhook_syscalln(__NR_openat, before_openat_1, after_openat_1);
         err = fp_hook_syscalln(__NR_openat, 4, before_openat_0, 0, 0);
         if (err) goto out;
         err = fp_hook_syscalln(__NR_openat, 4, before_openat_1, after_openat_1, &open_counts);
         
     } else if (!strcmp("hook_openat_inline", args)) {
         printk(KERN_INFO "[KP] Installing openat inline hook...\n");
+        // 先尝试移除可能存在的旧hook，避免重复安装
+        inline_unhook_syscalln(__NR_openat, before_openat_0, 0);
         err = inline_hook_syscalln(__NR_openat, 4, before_openat_0, 0, 0);
         
     } else if (!strcmp("hook_ptrace_fp", args)) {
         printk(KERN_INFO "[KP] Installing ptrace function pointer hook...\n");
+        // 先尝试移除可能存在的旧hook，避免重复安装
+        fp_unhook_syscalln(__NR_ptrace, before_ptrace_0, after_ptrace_0);
         err = fp_hook_syscalln(__NR_ptrace, 4, before_ptrace_0, after_ptrace_0, 0);
         
     } else if (!strcmp("unhook_openat", args)) {
@@ -244,7 +251,23 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
 
 out:
     if (err) {
-        printk(KERN_ERR "[KP] Hook operation error: %d\n", err);
+        switch (err) {
+            case HOOK_DUPLICATED:
+                printk(KERN_WARNING "[KP] Hook already exists (code: %d)\n", err);
+                break;
+            case HOOK_BAD_ADDRESS:
+                printk(KERN_ERR "[KP] Invalid hook address (code: %d)\n", err);
+                break;
+            case HOOK_NO_MEM:
+                printk(KERN_ERR "[KP] Insufficient memory for hook (code: %d)\n", err);
+                break;
+            case HOOK_CHAIN_FULL:
+                printk(KERN_ERR "[KP] Hook chain is full (code: %d)\n", err);
+                break;
+            default:
+                printk(KERN_ERR "[KP] Hook operation error: %d\n", err);
+                break;
+        }
         return -1;
     } else {
         printk(KERN_INFO "[KP] Hook operation success\n");
