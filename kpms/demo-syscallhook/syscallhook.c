@@ -13,7 +13,6 @@
 #include <linux/string.h>
 #include <kputils.h>
 #include <asm/current.h>
-#include <linux/stacktrace.h>
 
 KPM_NAME("kpm-syscall-hook-demo");
 KPM_VERSION("1.0.0");
@@ -24,7 +23,7 @@ KPM_DESCRIPTION("KernelPatch Module System Call Hook Example");
 const char *margs = 0;
 enum hook_type hook_type = NONE;
 
-// 栈回溯配置
+// 栈回溯配置（暂时禁用）
 static bool enable_stack_trace = false;
 
 enum pid_type
@@ -38,38 +37,12 @@ enum pid_type
 struct pid_namespace;
 pid_t (*__task_pid_nr_ns)(struct task_struct *task, enum pid_type type, struct pid_namespace *ns) = 0;
 
-// KernelPatch栈回溯函数
+// 简化的栈回溯函数（完全禁用，避免符号查找问题）
 static void do_stack_trace(pid_t pid)
 {
-    #define MAX_STACK_ENTRIES 16
-    unsigned long entries[MAX_STACK_ENTRIES];
-    struct stack_trace trace;
-    int i;
-    
     if (!enable_stack_trace) return;
     
-    // 初始化栈跟踪结构
-    trace.nr_entries = 0;
-    trace.max_entries = MAX_STACK_ENTRIES;
-    trace.entries = entries;
-    trace.skip = 0;
-    
-    printk(KERN_INFO "[KP] === Stack trace for pid:%d ===\n", pid);
-    
-    // 使用KernelPatch提供的用户空间栈回溯
-    save_stack_trace_user(&trace);
-    
-    if (trace.nr_entries == 0) {
-        printk(KERN_INFO "[KP] pid:%d No stack entries found\n", pid);
-        return;
-    }
-    
-    // 打印栈回溯信息
-    for (i = 0; i < trace.nr_entries; i++) {
-        printk(KERN_INFO "[KP] pid:%d frame[%d]: 0x%lx\n", pid, i, trace.entries[i]);
-    }
-    
-    printk(KERN_INFO "[KP] === End stack trace (%d entries) ===\n", trace.nr_entries);
+    printk(KERN_INFO "[KP] Stack trace for pid:%d (disabled for compatibility)\n", pid);
 }
 
 void before_openat_0(hook_fargs4_t *args, void *udata)
@@ -154,63 +127,15 @@ out:
 static long syscall_hook_control0(const char *args, char *__user out_msg, int outlen)
 {
     printk(KERN_INFO "[KP] syscall_hook control, args: %s\n", args ? args : "null");
-
+    
     if (!args) {
-        pr_info("Available commands:\n");
-        pr_info("  function_pointer_hook - Enable function pointer hook\n");
-        pr_info("  inline_hook - Enable inline hook\n");
-        pr_info("  unhook - Remove all hooks\n");
-        pr_info("  enable_stack_trace - Enable stack trace\n");
-        pr_info("  disable_stack_trace - Disable stack trace\n");
-        pr_info("  status - Show current status\n");
+        printk(KERN_INFO "[KP] Available commands: enable_stack_trace, disable_stack_trace, status\n");
         return 0;
     }
-
-    hook_err_t err = HOOK_NO_ERR;
-
-    if (!strcmp("function_pointer_hook", args)) {
-        // 先清理现有hook
-        if (hook_type == INLINE_CHAIN) {
-            inline_unhook_syscalln(__NR_openat, before_openat_0, 0);
-        } else if (hook_type == FUNCTION_POINTER_CHAIN) {
-            fp_unhook_syscalln(__NR_openat, before_openat_0, 0);
-            fp_unhook_syscalln(__NR_openat, before_openat_1, after_openat_1);
-        }
-        
-        printk(KERN_INFO "[KP] Installing function pointer hook...\n");
-        hook_type = FUNCTION_POINTER_CHAIN;
-        err = fp_hook_syscalln(__NR_openat, 4, before_openat_0, 0, 0);
-        if (err) goto out;
-        err = fp_hook_syscalln(__NR_openat, 4, before_openat_1, after_openat_1, &open_counts);
-        
-    } else if (!strcmp("inline_hook", args)) {
-        // 先清理现有hook
-        if (hook_type == INLINE_CHAIN) {
-            inline_unhook_syscalln(__NR_openat, before_openat_0, 0);
-        } else if (hook_type == FUNCTION_POINTER_CHAIN) {
-            fp_unhook_syscalln(__NR_openat, before_openat_0, 0);
-            fp_unhook_syscalln(__NR_openat, before_openat_1, after_openat_1);
-        }
-        
-        printk(KERN_INFO "[KP] Installing inline hook...\n");
-        hook_type = INLINE_CHAIN;
-        err = inline_hook_syscalln(__NR_openat, 4, before_openat_0, 0, 0);
-        
-    } else if (!strcmp("unhook", args)) {
-        printk(KERN_INFO "[KP] Removing all hooks...\n");
-        if (hook_type == INLINE_CHAIN) {
-            inline_unhook_syscalln(__NR_openat, before_openat_0, 0);
-        } else if (hook_type == FUNCTION_POINTER_CHAIN) {
-            fp_unhook_syscalln(__NR_openat, before_openat_0, 0);
-            fp_unhook_syscalln(__NR_openat, before_openat_1, after_openat_1);
-        }
-        hook_type = NONE;
-        printk(KERN_INFO "[KP] All hooks removed\n");
-        return 0;
-        
-    } else if (!strcmp("enable_stack_trace", args)) {
+    
+    if (!strcmp("enable_stack_trace", args)) {
         enable_stack_trace = true;
-        printk(KERN_INFO "[KP] Stack trace enabled\n");
+        printk(KERN_INFO "[KP] Stack trace enabled (placeholder only)\n");
         return 0;
         
     } else if (!strcmp("disable_stack_trace", args)) {
@@ -231,16 +156,6 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
         printk(KERN_WARNING "[KP] Unknown command: %s\n", args);
         return -1;
     }
-
-out:
-    if (err) {
-        printk(KERN_ERR "[KP] Hook operation error: %d\n", err);
-        return -1;
-    } else {
-        printk(KERN_INFO "[KP] Hook operation success\n");
-        printk(KERN_INFO "[KP] Stack trace: %s\n", enable_stack_trace ? "ENABLED" : "DISABLED");
-    }
-    return 0;
 }
 
 static long syscall_hook_demo_exit(void *__user reserved)
