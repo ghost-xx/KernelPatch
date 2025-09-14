@@ -16,10 +16,7 @@
 #include <linux/cred.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
-#include <linux/slab.h>
-#include <linux/dcache.h>
-#include <linux/fs.h>
-#include <linux/mm.h>
+#include <linux/sched.h>
 
 KPM_NAME("kpm-syscall-hook-demo");
 KPM_VERSION("1.0.0");
@@ -33,6 +30,7 @@ enum hook_type hook_type = NONE;
 // 反检测配置 - 默认全部开启
 static bool enable_proc_filter = true;     // 是否启用/proc文件过滤 (默认开启)
 static bool enable_ptrace_hide = true;     // 是否隐藏ptrace痕迹 (默认开启)
+static bool enable_mount_hide = true;      // 是否隐藏挂载信息检测 (默认开启)
 static bool enable_anti_detect = true;     // 总开关 (默认开启)
 
 // 敏感的/proc文件列表
@@ -53,54 +51,55 @@ enum pid_type
 struct pid_namespace;
 pid_t (*__task_pid_nr_ns)(struct task_struct *task, enum pid_type type, struct pid_namespace *ns) = 0;
 
-// 检查是否是系统应用（通过进程信息判断，不应被拦截）
+// 检查是否是系统应用（通过进程名称判断，不应被拦截）
 static bool is_system_app(void)
 {
     struct task_struct *task = current;
-    struct mm_struct *mm;
-    struct file *exe_file;
-    char *pathname = NULL;
-    char *path_buf = NULL;
-    bool is_system = false;
     
     if (!task) {
         return false;
     }
     
-    mm = task->mm;
-    if (!mm) {
-        return true; // 内核线程，认为是系统进程
+    // 没有mm说明是内核线程，认为是系统进程
+    if (!task->mm) {
+        return true; 
     }
     
-    exe_file = mm->exe_file;
-    if (!exe_file) {
-        return false;
+    // 检查常见的系统进程名称
+    if (strstr(task->comm, "system_server") ||    // Android系统服务
+        strstr(task->comm, "surfaceflinger") ||   // 显示服务
+        strstr(task->comm, "servicemanager") ||   // 服务管理器
+        strstr(task->comm, "init") ||             // init进程
+        strstr(task->comm, "kernel") ||           // 内核相关
+        strstr(task->comm, "kthread") ||          // 内核线程
+        strstr(task->comm, "migration") ||        // 迁移线程
+        strstr(task->comm, "rcu_") ||             // RCU线程
+        strstr(task->comm, "watchdog") ||         // 看门狗
+        strstr(task->comm, "ksoftirqd") ||        // 软中断
+        strstr(task->comm, "netd") ||             // 网络守护进程
+        strstr(task->comm, "installd") ||         // 安装守护进程
+        strstr(task->comm, "vold") ||             // 卷管理
+        strstr(task->comm, "drmserver") ||        // DRM服务
+        strstr(task->comm, "mediaserver") ||      // 媒体服务
+        strstr(task->comm, "cameraserver") ||     // 相机服务
+        strstr(task->comm, "audioserver") ||      // 音频服务
+        strstr(task->comm, "gatekeeperd") ||      // 网关守护进程
+        strstr(task->comm, "keystore") ||         // 密钥存储
+        strstr(task->comm, "healthd") ||          // 健康守护进程
+        strstr(task->comm, "logd") ||             // 日志守护进程
+        strstr(task->comm, "adbd") ||             // ADB守护进程
+        strstr(task->comm, "zygote") ||           // Zygote进程
+        strstr(task->comm, "app_process")) {      // 应用进程启动器
+        return true;
     }
     
-    // 分配临时缓冲区获取路径
-    path_buf = kmalloc(256, GFP_ATOMIC);
-    if (!path_buf) {
-        return false;
+    // 检查PID范围 - 系统关键进程通常PID较小
+    pid_t pid = task->pid;
+    if (pid <= 1000) {
+        return true;
     }
     
-    pathname = d_path(&exe_file->f_path, path_buf, 256);
-    if (IS_ERR(pathname)) {
-        kfree(path_buf);
-        return false;
-    }
-    
-    // 检查系统应用路径特征
-    if (strstr(pathname, "/system/") ||           // 系统分区
-        strstr(pathname, "/vendor/") ||           // 厂商分区  
-        strstr(pathname, "/apex/") ||             // APEX模块
-        strstr(pathname, "/system_ext/") ||       // 系统扩展
-        strstr(pathname, "/product/") ||          // 产品分区
-        strstr(pathname, "/odm/")) {              // ODM分区
-        is_system = true;
-    }
-    
-    kfree(path_buf);
-    return is_system;
+    return false;
 }
 
 // 检查是否是敏感的/proc文件（仅对非系统应用）
