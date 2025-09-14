@@ -96,9 +96,9 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
 static long syscall_hook_demo_exit(void *__user reserved) {
     pr_info("kpm-syscall-hook-demo-improved exit ...\n");
     
-    // 取消hook
+    // 取消hook - 使用正确的函数名
     if (openat_hook_handle) {
-        unhook_syscall(openat_hook_handle);
+        unhook_syscalln(openat_hook_handle);  // 修正为 unhook_syscalln
         pr_info("unhook openat success\n");
     }
     
