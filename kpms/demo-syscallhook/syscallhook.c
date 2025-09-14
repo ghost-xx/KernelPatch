@@ -13,6 +13,7 @@
 #include <linux/string.h>
 #include <kputils.h>
 #include <asm/current.h>
+#include <linux/cred.h>
 
 KPM_NAME("kpm-syscall-hook-demo");
 KPM_VERSION("1.0.0");
@@ -22,6 +23,9 @@ KPM_DESCRIPTION("KernelPatch Module System Call Hook Example");
 
 const char *margs = 0;
 enum hook_type hook_type = NONE;
+
+// 安全模式：避免与LSPosed/Xposed冲突
+static bool safe_mode = true;
 
 enum pid_type
 {
@@ -46,23 +50,30 @@ void before_openat_0(hook_fargs4_t *args, void *udata)
 
     struct task_struct *task = current;
     pid_t pid = -1, tgid = -1;
-    uid_t uid = -1;
     
     if (__task_pid_nr_ns) {
         pid = __task_pid_nr_ns(task, PIDTYPE_PID, 0);
         tgid = __task_pid_nr_ns(task, PIDTYPE_TGID, 0);
     }
-    
-    // 获取UID
-    if (task && task->cred) {
-        uid = task->cred->uid.val;
-    }
 
     args->local.data0 = (uint64_t)task;
 
-    // 添加UID的日志格式，便于dmesg过滤
-    printk(KERN_INFO "[KP] pid:%d tgid:%d uid:%d task:%llx openat dfd:%d filename:%s flag:%x mode:%d\n", 
-           pid, tgid, uid, task, dfd, buf, flag, mode);
+    // 安全模式：过滤可能冲突的路径和进程
+    if (safe_mode) {
+        // 过滤LSPosed/Xposed相关路径
+        if (strstr(buf, "lsposed") || strstr(buf, "xposed") || 
+            strstr(buf, "zygisk") || strstr(buf, "magisk") ||
+            strstr(buf, "/system/framework/") || strstr(buf, "/data/adb/") ||
+            strstr(buf, "/dev/ashmem") || strstr(buf, "/proc/self/") ||
+            strstr(buf, "libxposed") || strstr(buf, "liblsposed")) {
+            // 跳过这些敏感路径，减少冲突风险
+            return;
+        }
+    }
+
+    // 简化日志格式，先确保PID和TGID正常显示
+    printk(KERN_INFO "[KP] pid:%d tgid:%d task:%llx openat dfd:%d filename:%s flag:%x mode:%d\n", 
+           pid, tgid, task, dfd, buf, flag, mode);
 }
 
 uint64_t open_counts = 0;
@@ -172,8 +183,19 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
         printk(KERN_INFO "[KP] control: hooks removed\n");
         return 0;
         
+    } else if (!strcmp("safe_mode_on", args)) {
+        safe_mode = true;
+        printk(KERN_INFO "[KP] control: Safe mode enabled (LSPosed/Xposed compatible)\n");
+        return 0;
+        
+    } else if (!strcmp("safe_mode_off", args)) {
+        safe_mode = false;
+        printk(KERN_INFO "[KP] control: Safe mode disabled (may conflict with LSPosed/Xposed)\n");
+        return 0;
+        
     } else if (!strcmp("status", args)) {
-        printk(KERN_INFO "[KP] control: Hook type:%d\n", hook_type);
+        printk(KERN_INFO "[KP] control: Hook type:%d, Safe mode:%s\n", 
+               hook_type, safe_mode ? "enabled" : "disabled");
         return 0;
         
     } else {
@@ -182,6 +204,8 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
         printk(KERN_INFO "[KP] control:   function_pointer_hook - Enable function pointer hook\n");
         printk(KERN_INFO "[KP] control:   inline_hook - Enable inline hook\n");
         printk(KERN_INFO "[KP] control:   unhook - Remove all hooks\n");
+        printk(KERN_INFO "[KP] control:   safe_mode_on - Enable LSPosed/Xposed compatibility\n");
+        printk(KERN_INFO "[KP] control:   safe_mode_off - Disable safe mode (full monitoring)\n");
         printk(KERN_INFO "[KP] control:   status - Show current status\n");
         return -1;
     }
