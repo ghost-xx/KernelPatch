@@ -29,171 +29,109 @@ KPM_DESCRIPTION("KernelPatch Module System Call Hook Example");
 const char *margs = 0;
 enum hook_type hook_type = NONE;
 
-// 反检测配置 - 默认全部开启
-static bool enable_proc_filter = true;     // 是否启用/proc文件过滤 (默认开启)
-static bool enable_ptrace_hide = true;     // 是否隐藏ptrace痕迹 (默认开启)
-static bool enable_mount_hide = true;      // 是否隐藏挂载信息检测 (默认开启)
-static bool enable_anti_detect = true;     // 总开关 (默认开启)
+// 监控配置
+static bool enable_stack_trace = false;    // 是否启用栈回溯 (默认关闭，性能考虑)
 
-// 敏感的/proc文件列表
-static const char *sensitive_proc_files[] = {
-    "mounts", "mountinfo", "mountstats", "maps", "smaps", 
-    "status", "stat", "cmdline", "environ", "fd/", "task/",
-    NULL
-};
+// 移除敏感文件列表（不再需要反检测）
 
 // 内核PID函数声明（如果头文件中没有导出）
 extern pid_t task_pid_nr(struct task_struct *task);
 extern pid_t task_tgid_nr(struct task_struct *task);
 
-// 获取当前进程名称的简化方法 - 最大兼容性
+// 栈回溯相关函数类型定义（基于APatch教程）
+typedef int (*access_process_vm_t)(struct task_struct *tsk, unsigned long addr, void *buf, int len, int write);
+typedef struct mm_struct *(*get_task_mm_t)(struct task_struct *task);
+typedef void (*mmput_t)(struct mm_struct *mm);
+typedef void (*get_task_comm_t)(char *buf, int len, struct task_struct *task);
+
+// 函数指针声明
+static access_process_vm_t access_process_vm_func = NULL;
+static get_task_mm_t get_task_mm_func = NULL; 
+static mmput_t mmput_func = NULL;
+static get_task_comm_t get_task_comm_func = NULL;
+
+// ARM64栈帧结构（基于APatch教程）
+struct user_frame {
+    unsigned long fp;  // x29寄存器 - 帧指针
+    unsigned long lr;  // x30寄存器 - 链接寄存器（返回地址）
+};
+
+// 栈回溯实现（基于APatch教程）
+static bool unwind_user_stack(struct task_struct *task, pid_t pid)
+{
+    struct user_frame frame;
+    int i;
+    
+    if (!access_process_vm_func || !get_task_mm_func || !mmput_func) {
+        printk(KERN_WARNING "[KP] Stack unwinding functions not available\n");
+        return false;
+    }
+    
+    // 获取当前寄存器状态
+    struct pt_regs *regs = task_pt_regs(task);
+    if (!regs) {
+        return false;
+    }
+    
+    frame.fp = regs->regs[29];  // x29 - 帧指针
+    frame.lr = regs->regs[30];  // x30 - 链接寄存器
+    unsigned long pc = regs->pc; // 程序计数器
+    
+    // 获取进程内存管理结构
+    struct mm_struct *mm = get_task_mm_func(task);
+    if (!mm) {
+        return false;
+    }
+    
+    printk(KERN_INFO "[KP] === Stack trace for pid:%d ===\n", pid);
+    
+    // 栈回溯循环（最多16层）
+    for (i = 0; i < 16; i++) {
+        if (i == 0) {
+            printk(KERN_INFO "[KP] pid:%d frame[%d]: lr:0x%llx, fp:0x%llx, pc:0x%llx\n", 
+                   pid, i, frame.lr, frame.fp, pc);
+        } else {
+            printk(KERN_INFO "[KP] pid:%d frame[%d]: lr:0x%llx, fp:0x%llx\n", 
+                   pid, i, frame.lr, frame.fp);
+        }
+        
+        // 检查帧指针和返回地址是否有效
+        if (!frame.fp || !frame.lr) {
+            break;
+        }
+        
+        // 从用户空间读取下一个栈帧
+        if (access_process_vm_func(task, frame.fp, &frame, sizeof(struct user_frame), 0) != sizeof(frame)) {
+            printk(KERN_INFO "[KP] pid:%d Failed to read frame at 0x%llx\n", pid, frame.fp);
+            break;
+        }
+    }
+    
+    printk(KERN_INFO "[KP] === End of stack trace ===\n");
+    mmput_func(mm);
+    return true;
+}
+
+// 获取当前进程名称的改进方法
 static void get_current_comm(char *buf, size_t size)
 {
-    // 简化方案：直接使用PID作为标识，避免复杂的进程名获取
-    if (size > 0) {
+    if (get_task_comm_func && size > 0) {
+        // 使用内核函数获取进程名
+        get_task_comm_func(buf, size, current);
+    } else if (size > 0) {
+        // fallback: 使用PID作为标识
         pid_t pid = task_pid_nr(current);
         snprintf(buf, size, "pid_%d", pid);
     }
 }
 
-// 检查是否是系统应用（简化版本，主要基于PID判断）
-static bool is_system_app_by_hook_info(pid_t pid, pid_t tgid, const char *comm)
-{
-    // 1. 系统关键进程通常PID较小 - 这是最可靠的判断方法
-    if (pid <= 1000) {
-        return true;
-    }
-    
-    // 2. 内核线程检查 (TGID为0通常表示内核线程)
-    if (tgid == 0) {
-        return true;
-    }
-    
-    // 3. 对于Android系统，还可以基于PID范围进行更精确的判断
-    // Android系统服务通常在1000-2000范围内
-    if (pid >= 1000 && pid <= 2000) {
-        return true;
-    }
-    
-    // 4. 如果comm包含PID信息，可以进行一些基本的判断
-    // 但为了最大兼容性，我们主要依赖PID范围
-    
-    return false;
-}
+// 移除系统应用检测函数（不再需要反检测）
 
-// 简化版本，用于不需要详细信息的场合
-static bool is_system_app(void)
-{
-    pid_t pid = task_pid_nr(current);
-    pid_t tgid = task_tgid_nr(current);
-    char comm[TASK_COMM_LEN];
-    get_current_comm(comm, sizeof(comm));
-    
-    return is_system_app_by_hook_info(pid, tgid, comm);
-}
+// 移除Root检测相关函数（不再需要反检测）
 
-// 检查是否是Root检测相关的挂载文件访问
-static bool is_root_detection_mount_access(const char *filename, pid_t pid, pid_t tgid, const char *comm)
-{
-    if (!filename || !enable_mount_hide || !enable_anti_detect) {
-        return false;
-    }
-    
-    // 系统应用不拦截
-    if (is_system_app_by_hook_info(pid, tgid, comm)) {
-        return false;
-    }
-    
-    // 检查是否访问用于Root检测的关键挂载文件
-    if (strstr(filename, "/proc/mounts") ||           // 系统挂载信息
-        strstr(filename, "/proc/mountinfo") ||        // 详细挂载信息  
-        strstr(filename, "/proc/mountstats") ||       // 挂载统计信息
-        strstr(filename, "/proc/self/mounts") ||      // 当前进程挂载视图
-        strstr(filename, "/proc/self/mountinfo") ||   // 当前进程挂载详情
-        strstr(filename, "/proc/1/mounts") ||         // init进程挂载信息
-        strstr(filename, "/proc/1/mountinfo")) {      // init进程挂载详情
-        
-        // 这些文件常被用来检测:
-        // 1. Magisk: 检查是否有 /sbin/.magisk 等异常挂载
-        // 2. KernelSU: 检查是否有 overlayfs 挂载
-        // 3. APatch: 检查内核模块相关挂载
-        // 4. Zygisk: 检查 zygote 进程的挂载namespace
-        return true;
-    }
-    
-    return false;
-}
+// 移除敏感文件检测函数（不再需要反检测）
 
-// 检查是否是敏感的/proc文件（仅对非系统应用）
-static bool is_sensitive_proc_file(const char *filename, pid_t pid, pid_t tgid, const char *comm)
-{
-    if (!filename || !enable_proc_filter || !enable_anti_detect) {
-        return false;
-    }
-    
-    // 系统应用不拦截，避免系统崩溃
-    if (is_system_app_by_hook_info(pid, tgid, comm)) {
-        return false;
-    }
-    
-    // 检查是否是/proc路径
-    if (strncmp(filename, "/proc/", 6) != 0) {
-        return false;
-    }
-    
-    // 只拦截访问其他进程信息的敏感文件
-    // 允许访问自己的/proc信息，但拦截访问其他进程的信息
-    if (strstr(filename, "maps") || 
-        strstr(filename, "smaps") ||
-        strstr(filename, "status") ||
-        strstr(filename, "stat") ||
-        strstr(filename, "cmdline") ||
-        strstr(filename, "environ")) {
-        
-        // 检查是否是访问其他进程的信息
-        char pid_str[16];
-        snprintf(pid_str, sizeof(pid_str), "/proc/%d/", pid);
-        
-        // 如果不是访问自己的信息，则认为是敏感访问
-        if (!strstr(filename, pid_str)) {
-            return true;
-        }
-    }
-    
-    return false;
-}
-
-// 检查是否是ptrace相关调用
-static bool is_ptrace_call(const char *filename, pid_t pid, pid_t tgid, const char *comm)
-{
-    if (!filename || !enable_ptrace_hide || !enable_anti_detect) {
-        return false;
-    }
-    
-    // 系统应用不拦截
-    if (is_system_app_by_hook_info(pid, tgid, comm)) {
-        return false;
-    }
-    
-    // 检查ptrace相关文件，但只拦截跨进程访问
-    if (strstr(filename, "/proc/") && (
-        strstr(filename, "status") || 
-        strstr(filename, "stat") ||
-        strstr(filename, "task") ||
-        strstr(filename, "mem"))) {
-        
-        // 检查是否是访问其他进程
-        char pid_str[16];
-        snprintf(pid_str, sizeof(pid_str), "/proc/%d/", pid);
-        
-        // 如果不是访问自己的信息，则认为是ptrace尝试
-        if (!strstr(filename, pid_str)) {
-            return true;
-        }
-    }
-    
-    return false;
-}
+// 移除ptrace检测函数（不再需要反检测）
 
 void before_openat_0(hook_fargs4_t *args, void *udata)
 {
@@ -211,39 +149,21 @@ void before_openat_0(hook_fargs4_t *args, void *udata)
 
     args->local.data0 = (uint64_t)task;
 
-    // 获取进程名用于系统应用检测和日志
+    // 获取进程名用于日志
     char comm[TASK_COMM_LEN];
     get_current_comm(comm, sizeof(comm));
     
-    // 反检测逻辑 - 使用钩子中的完整进程信息进行精确判断
-    bool is_sensitive = is_sensitive_proc_file(buf, pid, tgid, comm);
-    bool is_ptrace = is_ptrace_call(buf, pid, tgid, comm);
-    bool is_mount_detect = is_root_detection_mount_access(buf, pid, tgid, comm);
-    
-    // 检查是否是系统应用（用于调试和日志）
-    bool is_sys_app = is_system_app_by_hook_info(pid, tgid, comm);
-    
-    if (enable_anti_detect && (is_sensitive || is_ptrace || is_mount_detect)) {
-        
-        // 记录被拦截的访问
-        if (is_sensitive) {
-            printk(KERN_INFO "[KP] BLOCKED sensitive proc file: pid:%d tgid:%d comm:%s filename:%s\n", pid, tgid, comm, buf);
-        }
-        if (is_ptrace) {
-            printk(KERN_INFO "[KP] BLOCKED ptrace attempt: pid:%d tgid:%d comm:%s filename:%s\n", pid, tgid, comm, buf);
-        }
-        if (is_mount_detect) {
-            printk(KERN_INFO "[KP] BLOCKED root detection (mount): pid:%d tgid:%d comm:%s filename:%s\n", pid, tgid, comm, buf);
-        }
-        // 对于敏感文件访问，我们只记录但不阻止（避免破坏系统功能）
-        // 实际的阻止可以通过修改返回值在 after_openat 中实现
-        args->local.data1 = 1;  // 标记这是一个敏感访问
-        return;  // 不记录敏感操作的详细日志
+    args->local.data1 = 0;  // 标记为正常访问
+
+    // 如果启用栈回溯，进行栈回溯（基于APatch教程）
+    if (enable_stack_trace) {
+        printk(KERN_INFO "[KP] Performing stack trace for syscall...\n");
+        unwind_user_stack(task, pid);
     }
 
-    // 正常日志记录（显示是否为系统应用）
-    printk(KERN_INFO "[KP] pid:%d tgid:%d comm:%s%s openat dfd:%d filename:%s flag:%x mode:%d\n", 
-           pid, tgid, comm, is_sys_app ? " (system)" : "", dfd, buf, flag, mode);
+    // 正常日志记录
+    printk(KERN_INFO "[KP] pid:%d tgid:%d comm:%s openat dfd:%d filename:%s flag:%x mode:%d\n", 
+           pid, tgid, comm, dfd, buf, flag, mode);
 }
 
 uint64_t open_counts = 0;
@@ -257,14 +177,11 @@ void before_openat_1(hook_fargs4_t *args, void *udata)
 
 void after_openat_1(hook_fargs4_t *args, void *udata)
 {
-    // 检查是否是被标记的敏感访问
-    if (args->local.data1 == 1 && enable_anti_detect) {
-        // 对于敏感文件访问，修改返回值为错误
-        args->ret = -ENOENT;  // 文件不存在错误
-        printk(KERN_INFO "[KP] Modified return value for sensitive access: task:%llx ret:-ENOENT\n", args->local.data0);
-    } else {
-        printk(KERN_INFO "[KP] hook_chain_1 after openat task:%llx\n", args->local.data0);
-    }
+    uint64_t *pcount = (uint64_t *)udata;
+    
+    // 正常的after钩子日志
+    printk(KERN_INFO "[KP] hook_chain_1 after openat task:%llx count:%llx ret:%ld\n", 
+           args->local.data0, *pcount, args->ret);
 }
 
 static long syscall_hook_demo_init(const char *args, const char *event, void *__user reserved)
@@ -273,6 +190,26 @@ static long syscall_hook_demo_init(const char *args, const char *event, void *__
     printk(KERN_INFO "[KP] kpm-syscall-hook-demo init, args:%s\n", margs ? margs : "null");
 
     // 直接使用内核提供的 task_pid_nr 和 task_tgid_nr 函数
+    
+    // 查找栈回溯相关函数（基于APatch教程）
+    access_process_vm_func = (access_process_vm_t)kallsyms_lookup_name("access_process_vm");
+    get_task_mm_func = (get_task_mm_t)kallsyms_lookup_name("get_task_mm");
+    mmput_func = (mmput_t)kallsyms_lookup_name("mmput");
+    get_task_comm_func = (get_task_comm_t)kallsyms_lookup_name("__get_task_comm");
+    
+    // 检查栈回溯函数是否可用
+    if (access_process_vm_func && get_task_mm_func && mmput_func) {
+        printk(KERN_INFO "[KP] Stack unwinding functions loaded successfully\n");
+    } else {
+        printk(KERN_WARNING "[KP] Some stack unwinding functions not found, stack trace disabled\n");
+        enable_stack_trace = false;
+    }
+    
+    if (get_task_comm_func) {
+        printk(KERN_INFO "[KP] Task comm function loaded successfully\n");
+    } else {
+        printk(KERN_WARNING "[KP] Task comm function not found, using fallback\n");
+    }
 
     if (!margs) {
         printk(KERN_WARNING "[KP] no args specified, skip hook\n");
@@ -363,56 +300,25 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
         printk(KERN_INFO "[KP] control: hooks removed\n");
         return 0;
         
-    } else if (!strcmp("enable_anti_detect", args)) {
-        enable_anti_detect = true;
-        enable_proc_filter = true;
-        enable_ptrace_hide = true;
-        printk(KERN_INFO "[KP] control: Anti-detection enabled\n");
+    // 移除所有反检测控制命令
+        
+    } else if (!strcmp("enable_stack_trace", args)) {
+        if (access_process_vm_func && get_task_mm_func && mmput_func) {
+            enable_stack_trace = true;
+            printk(KERN_INFO "[KP] control: Stack trace enabled\n");
+        } else {
+            printk(KERN_WARNING "[KP] control: Stack trace functions not available\n");
+        }
         return 0;
         
-    } else if (!strcmp("disable_anti_detect", args)) {
-        enable_anti_detect = false;
-        enable_proc_filter = false;
-        enable_ptrace_hide = false;
-        printk(KERN_INFO "[KP] control: Anti-detection disabled\n");
-        return 0;
-        
-    } else if (!strcmp("enable_proc_filter", args)) {
-        enable_proc_filter = true;
-        printk(KERN_INFO "[KP] control: Proc filter enabled\n");
-        return 0;
-        
-    } else if (!strcmp("disable_proc_filter", args)) {
-        enable_proc_filter = false;
-        printk(KERN_INFO "[KP] control: Proc filter disabled\n");
-        return 0;
-        
-    } else if (!strcmp("enable_ptrace_hide", args)) {
-        enable_ptrace_hide = true;
-        printk(KERN_INFO "[KP] control: Ptrace hiding enabled\n");
-        return 0;
-        
-    } else if (!strcmp("disable_ptrace_hide", args)) {
-        enable_ptrace_hide = false;
-        printk(KERN_INFO "[KP] control: Ptrace hiding disabled\n");
-        return 0;
-        
-    } else if (!strcmp("enable_mount_hide", args)) {
-        enable_mount_hide = true;
-        printk(KERN_INFO "[KP] control: Mount detection hiding enabled\n");
-        return 0;
-        
-    } else if (!strcmp("disable_mount_hide", args)) {
-        enable_mount_hide = false;
-        printk(KERN_INFO "[KP] control: Mount detection hiding disabled\n");
+    } else if (!strcmp("disable_stack_trace", args)) {
+        enable_stack_trace = false;
+        printk(KERN_INFO "[KP] control: Stack trace disabled\n");
         return 0;
         
     } else if (!strcmp("status", args)) {
         printk(KERN_INFO "[KP] control: Hook type:%d\n", hook_type);
-        printk(KERN_INFO "[KP] control: Anti-detect:%s\n", enable_anti_detect ? "enabled" : "disabled");
-        printk(KERN_INFO "[KP] control: Proc filter:%s\n", enable_proc_filter ? "enabled" : "disabled");
-        printk(KERN_INFO "[KP] control: Ptrace hide:%s\n", enable_ptrace_hide ? "enabled" : "disabled");
-        printk(KERN_INFO "[KP] control: Mount detection hide:%s\n", enable_mount_hide ? "enabled" : "disabled");
+        printk(KERN_INFO "[KP] control: Stack trace:%s\n", enable_stack_trace ? "enabled" : "disabled");
         return 0;
         
     } else {
@@ -421,14 +327,8 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
         printk(KERN_INFO "[KP] control:   function_pointer_hook - Enable function pointer hook\n");
         printk(KERN_INFO "[KP] control:   inline_hook - Enable inline hook\n");
         printk(KERN_INFO "[KP] control:   unhook - Remove all hooks\n");
-        printk(KERN_INFO "[KP] control:   enable_anti_detect - Enable all anti-detection\n");
-        printk(KERN_INFO "[KP] control:   disable_anti_detect - Disable all anti-detection\n");
-        printk(KERN_INFO "[KP] control:   enable_proc_filter - Enable /proc filtering\n");
-        printk(KERN_INFO "[KP] control:   disable_proc_filter - Disable /proc filtering\n");
-        printk(KERN_INFO "[KP] control:   enable_ptrace_hide - Enable ptrace hiding\n");
-        printk(KERN_INFO "[KP] control:   disable_ptrace_hide - Disable ptrace hiding\n");
-        printk(KERN_INFO "[KP] control:   enable_mount_hide - Enable mount detection hiding\n");
-        printk(KERN_INFO "[KP] control:   disable_mount_hide - Disable mount detection hiding\n");
+        printk(KERN_INFO "[KP] control:   enable_stack_trace - Enable stack trace (APatch style)\n");
+        printk(KERN_INFO "[KP] control:   disable_stack_trace - Disable stack trace\n");
         printk(KERN_INFO "[KP] control:   status - Show current status\n");
         return -1;
     }
