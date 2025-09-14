@@ -23,6 +23,10 @@ KPM_DESCRIPTION("KernelPatch Module System Call Hook Example");
 const char *margs = 0;
 enum hook_type hook_type = NONE;
 
+// 过滤配置
+static char target_app[256] = {0};  // 目标应用名
+static bool filter_enabled = false; // 是否启用过滤
+
 enum pid_type
 {
     PIDTYPE_PID,
@@ -51,24 +55,55 @@ void before_openat_0(hook_fargs4_t *args, void *udata)
         tgid = __task_pid_nr_ns(task, PIDTYPE_TGID, 0);
     }
 
+    // 进程过滤逻辑
+    if (filter_enabled && target_app[0] != '\0') {
+        const char *comm = task->comm;
+        if (!strstr(comm, target_app)) {
+            // 不匹配目标应用，跳过日志
+            args->local.data0 = (uint64_t)task;
+            return;
+        }
+    }
+
     args->local.data0 = (uint64_t)task;
 
-    printk(KERN_INFO "[KP] hook_chain_0 task: %llx, pid: %d, tgid: %d, openat dfd: %d, filename: %s, flag: %x, mode: %d\n", task, pid,
-            tgid, dfd, buf, flag, mode);
+    // 输出进程名和详细信息
+    printk(KERN_INFO "[KP] [%s] hook_chain_0 task: %llx, pid: %d, tgid: %d, openat dfd: %d, filename: %s, flag: %x, mode: %d\n", 
+           task->comm, task, pid, tgid, dfd, buf, flag, mode);
 }
 
 uint64_t open_counts = 0;
 
 void before_openat_1(hook_fargs4_t *args, void *udata)
 {
+    // 如果 before_openat_0 因为过滤而跳过了，这里也跳过
+    if (filter_enabled && target_app[0] != '\0') {
+        struct task_struct *task = (struct task_struct *)args->local.data0;
+        const char *comm = task->comm;
+        if (!strstr(comm, target_app)) {
+            return;
+        }
+    }
+    
     uint64_t *pcount = (uint64_t *)udata;
     (*pcount)++;
-    printk(KERN_INFO "[KP] hook_chain_1 before openat task: %llx, count: %llx\n", args->local.data0, *pcount);
+    struct task_struct *task = (struct task_struct *)args->local.data0;
+    printk(KERN_INFO "[KP] [%s] hook_chain_1 before openat task: %llx, count: %llx\n", task->comm, args->local.data0, *pcount);
 }
 
 void after_openat_1(hook_fargs4_t *args, void *udata)
 {
-    printk(KERN_INFO "[KP] hook_chain_1 after openat task: %llx\n", args->local.data0);
+    // 如果 before_openat_0 因为过滤而跳过了，这里也跳过
+    if (filter_enabled && target_app[0] != '\0') {
+        struct task_struct *task = (struct task_struct *)args->local.data0;
+        const char *comm = task->comm;
+        if (!strstr(comm, target_app)) {
+            return;
+        }
+    }
+    
+    struct task_struct *task = (struct task_struct *)args->local.data0;
+    printk(KERN_INFO "[KP] [%s] hook_chain_1 after openat task: %llx\n", task->comm, args->local.data0);
 }
 
 static long syscall_hook_demo_init(const char *args, const char *event, void *__user reserved)
@@ -164,8 +199,36 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
         printk(KERN_INFO "[KP] control: hooks removed\n");
         return 0;
         
+    } else if (!strncmp("filter:", args, 7)) {
+        // 格式: filter:app_name 或 filter:off
+        const char *filter_arg = args + 7;
+        if (!strcmp("off", filter_arg)) {
+            filter_enabled = false;
+            target_app[0] = '\0';
+            printk(KERN_INFO "[KP] control: filter disabled\n");
+        } else {
+            filter_enabled = true;
+            strncpy(target_app, filter_arg, sizeof(target_app) - 1);
+            target_app[sizeof(target_app) - 1] = '\0';
+            printk(KERN_INFO "[KP] control: filter enabled for app: %s\n", target_app);
+        }
+        return 0;
+        
+    } else if (!strcmp("status", args)) {
+        printk(KERN_INFO "[KP] control: Status - Hook type: %d, Filter: %s, Target app: %s\n", 
+               hook_type, filter_enabled ? "enabled" : "disabled", 
+               target_app[0] ? target_app : "none");
+        return 0;
+        
     } else {
         printk(KERN_WARNING "[KP] control: unknown args: %s\n", args);
+        printk(KERN_INFO "[KP] control: Available commands:\n");
+        printk(KERN_INFO "[KP] control:   function_pointer_hook - Enable function pointer hook\n");
+        printk(KERN_INFO "[KP] control:   inline_hook - Enable inline hook\n");
+        printk(KERN_INFO "[KP] control:   unhook - Remove all hooks\n");
+        printk(KERN_INFO "[KP] control:   filter:app_name - Filter specific app (e.g., filter:com.example.app)\n");
+        printk(KERN_INFO "[KP] control:   filter:off - Disable filter\n");
+        printk(KERN_INFO "[KP] control:   status - Show current status\n");
         return -1;
     }
 
