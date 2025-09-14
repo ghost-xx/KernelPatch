@@ -24,8 +24,17 @@ KPM_DESCRIPTION("KernelPatch Module System Call Hook Example");
 const char *margs = 0;
 enum hook_type hook_type = NONE;
 
-// 安全模式：避免与LSPosed/Xposed冲突
-static bool safe_mode = true;
+// 反检测配置 - 默认全部开启
+static bool enable_proc_filter = true;     // 是否启用/proc文件过滤 (默认开启)
+static bool enable_ptrace_hide = true;     // 是否隐藏ptrace痕迹 (默认开启)
+static bool enable_anti_detect = true;     // 总开关 (默认开启)
+
+// 敏感的/proc文件列表
+static const char *sensitive_proc_files[] = {
+    "mounts", "mountinfo", "mountstats", "maps", "smaps", 
+    "status", "stat", "cmdline", "environ", "fd/", "task/",
+    NULL
+};
 
 enum pid_type
 {
@@ -37,6 +46,54 @@ enum pid_type
 };
 struct pid_namespace;
 pid_t (*__task_pid_nr_ns)(struct task_struct *task, enum pid_type type, struct pid_namespace *ns) = 0;
+
+// 检查是否是敏感的/proc文件
+static bool is_sensitive_proc_file(const char *filename)
+{
+    if (!filename || !enable_proc_filter || !enable_anti_detect) {
+        return false;
+    }
+    
+    // 检查是否是/proc路径
+    if (strncmp(filename, "/proc/", 6) != 0) {
+        return false;
+    }
+    
+    // 检查敏感文件列表
+    const char **file = sensitive_proc_files;
+    while (*file) {
+        if (strstr(filename, *file)) {
+            return true;
+        }
+        file++;
+    }
+    
+    // 检查是否访问其他进程的信息
+    if (strstr(filename, "/proc/") && strstr(filename, "/")) {
+        return true;
+    }
+    
+    return false;
+}
+
+// 检查是否是ptrace相关调用
+static bool is_ptrace_call(const char *filename)
+{
+    if (!filename || !enable_ptrace_hide || !enable_anti_detect) {
+        return false;
+    }
+    
+    // 检查ptrace相关文件
+    if (strstr(filename, "/proc/") && (
+        strstr(filename, "status") || 
+        strstr(filename, "stat") ||
+        strstr(filename, "task") ||
+        strstr(filename, "mem"))) {
+        return true;
+    }
+    
+    return false;
+}
 
 void before_openat_0(hook_fargs4_t *args, void *udata)
 {
@@ -58,20 +115,27 @@ void before_openat_0(hook_fargs4_t *args, void *udata)
 
     args->local.data0 = (uint64_t)task;
 
-    // 安全模式：过滤可能冲突的路径和进程
-    if (safe_mode) {
-        // 过滤LSPosed/Xposed相关路径
-        if (strstr(buf, "lsposed") || strstr(buf, "xposed") || 
-            strstr(buf, "zygisk") || strstr(buf, "magisk") ||
-            strstr(buf, "/system/framework/") || strstr(buf, "/data/adb/") ||
-            strstr(buf, "/dev/ashmem") || strstr(buf, "/proc/self/") ||
-            strstr(buf, "libxposed") || strstr(buf, "liblsposed")) {
-            // 跳过这些敏感路径，减少冲突风险
-            return;
+    // 反检测逻辑
+    bool is_sensitive = is_sensitive_proc_file(buf);
+    bool is_ptrace = is_ptrace_call(buf);
+    
+    if (enable_anti_detect && (is_sensitive || is_ptrace)) {
+        // 对敏感文件访问返回错误
+        if (is_sensitive) {
+            printk(KERN_INFO "[KP] BLOCKED sensitive proc file: pid:%d filename:%s\n", pid, buf);
+            // 修改返回值为 ENOENT (文件不存在)
+            syscall_argn(args, 1) = (uint64_t)"/dev/null";  // 重定向到安全文件
         }
+        
+        if (is_ptrace) {
+            printk(KERN_INFO "[KP] BLOCKED ptrace attempt: pid:%d filename:%s\n", pid, buf);
+            // 对ptrace相关访问也进行重定向
+            syscall_argn(args, 1) = (uint64_t)"/dev/zero";
+        }
+        return;  // 不记录敏感操作的详细日志
     }
 
-    // 简化日志格式，先确保PID和TGID正常显示
+    // 正常日志记录
     printk(KERN_INFO "[KP] pid:%d tgid:%d task:%llx openat dfd:%d filename:%s flag:%x mode:%d\n", 
            pid, tgid, task, dfd, buf, flag, mode);
 }
@@ -125,6 +189,10 @@ out:
         printk(KERN_ERR "[KP] hook openat error:%d\n", err);
     } else {
         printk(KERN_INFO "[KP] hook openat success\n");
+        // 显示反检测状态
+        printk(KERN_INFO "[KP] Anti-detection features: %s\n", enable_anti_detect ? "ENABLED" : "DISABLED");
+        printk(KERN_INFO "[KP] - Proc filter: %s\n", enable_proc_filter ? "ENABLED" : "DISABLED");
+        printk(KERN_INFO "[KP] - Ptrace hiding: %s\n", enable_ptrace_hide ? "ENABLED" : "DISABLED");
     }
     return 0;
 }
@@ -183,19 +251,45 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
         printk(KERN_INFO "[KP] control: hooks removed\n");
         return 0;
         
-    } else if (!strcmp("safe_mode_on", args)) {
-        safe_mode = true;
-        printk(KERN_INFO "[KP] control: Safe mode enabled (LSPosed/Xposed compatible)\n");
+    } else if (!strcmp("enable_anti_detect", args)) {
+        enable_anti_detect = true;
+        enable_proc_filter = true;
+        enable_ptrace_hide = true;
+        printk(KERN_INFO "[KP] control: Anti-detection enabled\n");
         return 0;
         
-    } else if (!strcmp("safe_mode_off", args)) {
-        safe_mode = false;
-        printk(KERN_INFO "[KP] control: Safe mode disabled (may conflict with LSPosed/Xposed)\n");
+    } else if (!strcmp("disable_anti_detect", args)) {
+        enable_anti_detect = false;
+        enable_proc_filter = false;
+        enable_ptrace_hide = false;
+        printk(KERN_INFO "[KP] control: Anti-detection disabled\n");
+        return 0;
+        
+    } else if (!strcmp("enable_proc_filter", args)) {
+        enable_proc_filter = true;
+        printk(KERN_INFO "[KP] control: Proc filter enabled\n");
+        return 0;
+        
+    } else if (!strcmp("disable_proc_filter", args)) {
+        enable_proc_filter = false;
+        printk(KERN_INFO "[KP] control: Proc filter disabled\n");
+        return 0;
+        
+    } else if (!strcmp("enable_ptrace_hide", args)) {
+        enable_ptrace_hide = true;
+        printk(KERN_INFO "[KP] control: Ptrace hiding enabled\n");
+        return 0;
+        
+    } else if (!strcmp("disable_ptrace_hide", args)) {
+        enable_ptrace_hide = false;
+        printk(KERN_INFO "[KP] control: Ptrace hiding disabled\n");
         return 0;
         
     } else if (!strcmp("status", args)) {
-        printk(KERN_INFO "[KP] control: Hook type:%d, Safe mode:%s\n", 
-               hook_type, safe_mode ? "enabled" : "disabled");
+        printk(KERN_INFO "[KP] control: Hook type:%d\n", hook_type);
+        printk(KERN_INFO "[KP] control: Anti-detect:%s\n", enable_anti_detect ? "enabled" : "disabled");
+        printk(KERN_INFO "[KP] control: Proc filter:%s\n", enable_proc_filter ? "enabled" : "disabled");
+        printk(KERN_INFO "[KP] control: Ptrace hide:%s\n", enable_ptrace_hide ? "enabled" : "disabled");
         return 0;
         
     } else {
@@ -204,8 +298,12 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
         printk(KERN_INFO "[KP] control:   function_pointer_hook - Enable function pointer hook\n");
         printk(KERN_INFO "[KP] control:   inline_hook - Enable inline hook\n");
         printk(KERN_INFO "[KP] control:   unhook - Remove all hooks\n");
-        printk(KERN_INFO "[KP] control:   safe_mode_on - Enable LSPosed/Xposed compatibility\n");
-        printk(KERN_INFO "[KP] control:   safe_mode_off - Disable safe mode (full monitoring)\n");
+        printk(KERN_INFO "[KP] control:   enable_anti_detect - Enable all anti-detection\n");
+        printk(KERN_INFO "[KP] control:   disable_anti_detect - Disable all anti-detection\n");
+        printk(KERN_INFO "[KP] control:   enable_proc_filter - Enable /proc filtering\n");
+        printk(KERN_INFO "[KP] control:   disable_proc_filter - Disable /proc filtering\n");
+        printk(KERN_INFO "[KP] control:   enable_ptrace_hide - Enable ptrace hiding\n");
+        printk(KERN_INFO "[KP] control:   disable_ptrace_hide - Disable ptrace hiding\n");
         printk(KERN_INFO "[KP] control:   status - Show current status\n");
         return -1;
     }
@@ -216,6 +314,12 @@ out_control:
         return -1;
     } else {
         printk(KERN_INFO "[KP] control: hook success\n");
+        // 显示反检测状态
+        printk(KERN_INFO "[KP] Anti-detection features: %s\n", enable_anti_detect ? "ENABLED" : "DISABLED");
+        if (enable_anti_detect) {
+            printk(KERN_INFO "[KP] - Proc filter: %s\n", enable_proc_filter ? "ENABLED" : "DISABLED");
+            printk(KERN_INFO "[KP] - Ptrace hiding: %s\n", enable_ptrace_hide ? "ENABLED" : "DISABLED");
+        }
         return 0;
     }
 }
