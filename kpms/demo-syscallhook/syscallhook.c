@@ -17,6 +17,7 @@
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/stacktrace.h>
 #include <linux/sched/task.h>
 #include <linux/sched/mm.h>
 
@@ -38,77 +39,43 @@ static bool enable_stack_trace = false;    // 是否启用栈回溯 (默认关�
 extern pid_t task_pid_nr(struct task_struct *task);
 extern pid_t task_tgid_nr(struct task_struct *task);
 
-// 栈回溯相关函数类型定义（基于APatch教程）
-typedef int (*access_process_vm_t)(struct task_struct *tsk, unsigned long addr, void *buf, int len, int write);
-typedef struct mm_struct *(*get_task_mm_t)(struct task_struct *task);
-typedef void (*mmput_t)(struct mm_struct *mm);
+// 使用KernelPatch提供的栈回溯API（更可靠）
 typedef void (*get_task_comm_t)(char *buf, int len, struct task_struct *task);
 
 // 函数指针声明
-static access_process_vm_t access_process_vm_func = NULL;
-static get_task_mm_t get_task_mm_func = NULL; 
-static mmput_t mmput_func = NULL;
 static get_task_comm_t get_task_comm_func = NULL;
 
-// ARM64栈帧结构（基于APatch教程）
-struct user_frame {
-    unsigned long fp;  // x29寄存器 - 帧指针
-    unsigned long lr;  // x30寄存器 - 链接寄存器（返回地址）
-};
-
-// 栈回溯实现（基于APatch教程）
-static bool unwind_user_stack(struct task_struct *task, pid_t pid)
+// 使用KernelPatch提供的栈回溯实现（更可靠）
+static bool kernel_stack_trace_user(pid_t pid)
 {
-    struct user_frame frame;
+    #define MAX_STACK_ENTRIES 16
+    unsigned long entries[MAX_STACK_ENTRIES];
+    struct stack_trace trace;
     int i;
     
-    if (!access_process_vm_func || !get_task_mm_func || !mmput_func) {
-        printk(KERN_WARNING "[KP] Stack unwinding functions not available\n");
+    // 初始化栈跟踪结构
+    trace.nr_entries = 0;
+    trace.max_entries = MAX_STACK_ENTRIES;
+    trace.entries = entries;
+    trace.skip = 0;
+    
+    printk(KERN_INFO "[KP] === KernelPatch Stack trace for pid:%d ===\n", pid);
+    
+    // 使用KernelPatch提供的用户空间栈回溯
+    save_stack_trace_user(&trace);
+    
+    if (trace.nr_entries == 0) {
+        printk(KERN_INFO "[KP] pid:%d No stack trace entries found\n", pid);
         return false;
     }
     
-    // 获取当前寄存器状态
-    struct pt_regs *regs = task_pt_regs(task);
-    if (!regs) {
-        return false;
+    // 打印栈回溯信息
+    for (i = 0; i < trace.nr_entries; i++) {
+        printk(KERN_INFO "[KP] pid:%d frame[%d]: 0x%lx\n", 
+               pid, i, trace.entries[i]);
     }
     
-    frame.fp = regs->regs[29];  // x29 - 帧指针
-    frame.lr = regs->regs[30];  // x30 - 链接寄存器
-    unsigned long pc = regs->pc; // 程序计数器
-    
-    // 获取进程内存管理结构
-    struct mm_struct *mm = get_task_mm_func(task);
-    if (!mm) {
-        return false;
-    }
-    
-    printk(KERN_INFO "[KP] === Stack trace for pid:%d ===\n", pid);
-    
-    // 栈回溯循环（最多16层）
-    for (i = 0; i < 16; i++) {
-        if (i == 0) {
-            printk(KERN_INFO "[KP] pid:%d frame[%d]: lr:0x%llx, fp:0x%llx, pc:0x%llx\n", 
-                   pid, i, frame.lr, frame.fp, pc);
-        } else {
-            printk(KERN_INFO "[KP] pid:%d frame[%d]: lr:0x%llx, fp:0x%llx\n", 
-                   pid, i, frame.lr, frame.fp);
-        }
-        
-        // 检查帧指针和返回地址是否有效
-        if (!frame.fp || !frame.lr) {
-            break;
-        }
-        
-        // 从用户空间读取下一个栈帧
-        if (access_process_vm_func(task, frame.fp, &frame, sizeof(struct user_frame), 0) != sizeof(frame)) {
-            printk(KERN_INFO "[KP] pid:%d Failed to read frame at 0x%llx\n", pid, frame.fp);
-            break;
-        }
-    }
-    
-    printk(KERN_INFO "[KP] === End of stack trace ===\n");
-    mmput_func(mm);
+    printk(KERN_INFO "[KP] === End of KernelPatch stack trace (%d entries) ===\n", trace.nr_entries);
     return true;
 }
 
@@ -155,10 +122,10 @@ void before_openat_0(hook_fargs4_t *args, void *udata)
     
     args->local.data1 = 0;  // 标记为正常访问
 
-    // 如果启用栈回溯，进行栈回溯（基于APatch教程）
+    // 如果启用栈回溯，使用KernelPatch提供的栈回溯API
     if (enable_stack_trace) {
-        printk(KERN_INFO "[KP] Performing stack trace for syscall...\n");
-        unwind_user_stack(task, pid);
+        printk(KERN_INFO "[KP] Performing KernelPatch stack trace for syscall...\n");
+        kernel_stack_trace_user(pid);
     }
 
     // 正常日志记录
@@ -191,25 +158,17 @@ static long syscall_hook_demo_init(const char *args, const char *event, void *__
 
     // 直接使用内核提供的 task_pid_nr 和 task_tgid_nr 函数
     
-    // 查找栈回溯相关函数（基于APatch教程）
-    access_process_vm_func = (access_process_vm_t)kallsyms_lookup_name("access_process_vm");
-    get_task_mm_func = (get_task_mm_t)kallsyms_lookup_name("get_task_mm");
-    mmput_func = (mmput_t)kallsyms_lookup_name("mmput");
+    // 查找进程名获取函数
     get_task_comm_func = (get_task_comm_t)kallsyms_lookup_name("__get_task_comm");
-    
-    // 检查栈回溯函数是否可用
-    if (access_process_vm_func && get_task_mm_func && mmput_func) {
-        printk(KERN_INFO "[KP] Stack unwinding functions loaded successfully\n");
-    } else {
-        printk(KERN_WARNING "[KP] Some stack unwinding functions not found, stack trace disabled\n");
-        enable_stack_trace = false;
-    }
     
     if (get_task_comm_func) {
         printk(KERN_INFO "[KP] Task comm function loaded successfully\n");
     } else {
         printk(KERN_WARNING "[KP] Task comm function not found, using fallback\n");
     }
+    
+    // KernelPatch栈回溯API总是可用的
+    printk(KERN_INFO "[KP] KernelPatch stack trace API available\n");
 
     if (!margs) {
         printk(KERN_WARNING "[KP] no args specified, skip hook\n");
@@ -303,12 +262,8 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
     // 移除所有反检测控制命令
         
     } else if (!strcmp("enable_stack_trace", args)) {
-        if (access_process_vm_func && get_task_mm_func && mmput_func) {
-            enable_stack_trace = true;
-            printk(KERN_INFO "[KP] control: Stack trace enabled\n");
-        } else {
-            printk(KERN_WARNING "[KP] control: Stack trace functions not available\n");
-        }
+        enable_stack_trace = true;
+        printk(KERN_INFO "[KP] control: KernelPatch stack trace enabled\n");
         return 0;
         
     } else if (!strcmp("disable_stack_trace", args)) {
@@ -327,7 +282,7 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
         printk(KERN_INFO "[KP] control:   function_pointer_hook - Enable function pointer hook\n");
         printk(KERN_INFO "[KP] control:   inline_hook - Enable inline hook\n");
         printk(KERN_INFO "[KP] control:   unhook - Remove all hooks\n");
-        printk(KERN_INFO "[KP] control:   enable_stack_trace - Enable stack trace (APatch style)\n");
+        printk(KERN_INFO "[KP] control:   enable_stack_trace - Enable stack trace (KernelPatch API)\n");
         printk(KERN_INFO "[KP] control:   disable_stack_trace - Disable stack trace\n");
         printk(KERN_INFO "[KP] control:   status - Show current status\n");
         return -1;
