@@ -102,6 +102,38 @@ static bool is_system_app(void)
     return false;
 }
 
+// 检查是否是Root检测相关的挂载文件访问
+static bool is_root_detection_mount_access(const char *filename)
+{
+    if (!filename || !enable_mount_hide || !enable_anti_detect) {
+        return false;
+    }
+    
+    // 系统应用不拦截
+    if (is_system_app()) {
+        return false;
+    }
+    
+    // 检查是否访问用于Root检测的关键挂载文件
+    if (strstr(filename, "/proc/mounts") ||           // 系统挂载信息
+        strstr(filename, "/proc/mountinfo") ||        // 详细挂载信息  
+        strstr(filename, "/proc/mountstats") ||       // 挂载统计信息
+        strstr(filename, "/proc/self/mounts") ||      // 当前进程挂载视图
+        strstr(filename, "/proc/self/mountinfo") ||   // 当前进程挂载详情
+        strstr(filename, "/proc/1/mounts") ||         // init进程挂载信息
+        strstr(filename, "/proc/1/mountinfo")) {      // init进程挂载详情
+        
+        // 这些文件常被用来检测:
+        // 1. Magisk: 检查是否有 /sbin/.magisk 等异常挂载
+        // 2. KernelSU: 检查是否有 overlayfs 挂载
+        // 3. APatch: 检查内核模块相关挂载
+        // 4. Zygisk: 检查 zygote 进程的挂载namespace
+        return true;
+    }
+    
+    return false;
+}
+
 // 检查是否是敏感的/proc文件（仅对非系统应用）
 static bool is_sensitive_proc_file(const char *filename, pid_t current_pid)
 {
@@ -196,14 +228,18 @@ void before_openat_0(hook_fargs4_t *args, void *udata)
     // 反检测逻辑
     bool is_sensitive = is_sensitive_proc_file(buf, pid);
     bool is_ptrace = is_ptrace_call(buf, pid);
+    bool is_mount_detect = is_root_detection_mount_access(buf);
     
-    if (enable_anti_detect && (is_sensitive || is_ptrace)) {
+    if (enable_anti_detect && (is_sensitive || is_ptrace || is_mount_detect)) {
         // 记录被拦截的访问
         if (is_sensitive) {
-            printk(KERN_INFO "[KP] BLOCKED sensitive proc file: pid:%d filename:%s\n", pid, buf);
+            printk(KERN_INFO "[KP] BLOCKED sensitive proc file: pid:%d comm:%s filename:%s\n", pid, task->comm, buf);
         }
         if (is_ptrace) {
-            printk(KERN_INFO "[KP] BLOCKED ptrace attempt: pid:%d filename:%s\n", pid, buf);
+            printk(KERN_INFO "[KP] BLOCKED ptrace attempt: pid:%d comm:%s filename:%s\n", pid, task->comm, buf);
+        }
+        if (is_mount_detect) {
+            printk(KERN_INFO "[KP] BLOCKED root detection (mount): pid:%d comm:%s filename:%s\n", pid, task->comm, buf);
         }
         // 对于敏感文件访问，我们只记录但不阻止（避免破坏系统功能）
         // 实际的阻止可以通过修改返回值在 after_openat 中实现
@@ -368,11 +404,22 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
         printk(KERN_INFO "[KP] control: Ptrace hiding disabled\n");
         return 0;
         
+    } else if (!strcmp("enable_mount_hide", args)) {
+        enable_mount_hide = true;
+        printk(KERN_INFO "[KP] control: Mount detection hiding enabled\n");
+        return 0;
+        
+    } else if (!strcmp("disable_mount_hide", args)) {
+        enable_mount_hide = false;
+        printk(KERN_INFO "[KP] control: Mount detection hiding disabled\n");
+        return 0;
+        
     } else if (!strcmp("status", args)) {
         printk(KERN_INFO "[KP] control: Hook type:%d\n", hook_type);
         printk(KERN_INFO "[KP] control: Anti-detect:%s\n", enable_anti_detect ? "enabled" : "disabled");
         printk(KERN_INFO "[KP] control: Proc filter:%s\n", enable_proc_filter ? "enabled" : "disabled");
         printk(KERN_INFO "[KP] control: Ptrace hide:%s\n", enable_ptrace_hide ? "enabled" : "disabled");
+        printk(KERN_INFO "[KP] control: Mount detection hide:%s\n", enable_mount_hide ? "enabled" : "disabled");
         return 0;
         
     } else {
@@ -387,6 +434,8 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
         printk(KERN_INFO "[KP] control:   disable_proc_filter - Disable /proc filtering\n");
         printk(KERN_INFO "[KP] control:   enable_ptrace_hide - Enable ptrace hiding\n");
         printk(KERN_INFO "[KP] control:   disable_ptrace_hide - Disable ptrace hiding\n");
+        printk(KERN_INFO "[KP] control:   enable_mount_hide - Enable mount detection hiding\n");
+        printk(KERN_INFO "[KP] control:   disable_mount_hide - Disable mount detection hiding\n");
         printk(KERN_INFO "[KP] control:   status - Show current status\n");
         return -1;
     }
