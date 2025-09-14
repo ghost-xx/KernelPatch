@@ -14,6 +14,7 @@
 #include <kputils.h>
 #include <asm/current.h>
 #include <linux/sched.h>
+#include <linux/sched/task.h>
 
 KPM_NAME("kpm-syscall-hook-demo");
 KPM_VERSION("1.0.0");
@@ -24,9 +25,10 @@ KPM_DESCRIPTION("KernelPatch Module System Call Hook Example");
 const char *margs = 0;
 enum hook_type hook_type = NONE;
 
-// 过滤配置
-static char target_app[256] = {0};  // 目标应用名
-static bool filter_enabled = false; // 是否启用过滤
+// PID 过滤配置
+static pid_t target_pid = 0;      // 目标进程PID (0表示不过滤)
+static pid_t target_tgid = 0;     // 目标线程组PID (0表示不过滤)
+static bool pid_filter_enabled = false; // 是否启用PID过滤
 
 enum pid_type
 {
@@ -56,55 +58,63 @@ void before_openat_0(hook_fargs4_t *args, void *udata)
         tgid = __task_pid_nr_ns(task, PIDTYPE_TGID, 0);
     }
 
-    // 进程过滤逻辑
-    if (filter_enabled && target_app[0] != '\0') {
-        const char *comm = task->comm;
-        if (!strstr(comm, target_app)) {
-            // 不匹配目标应用，跳过日志
-            args->local.data0 = (uint64_t)task;
+    args->local.data0 = (uint64_t)task;
+
+    // PID 过滤逻辑
+    if (pid_filter_enabled) {
+        bool should_log = false;
+        
+        // 检查是否匹配目标PID或TGID
+        if (target_pid > 0 && pid == target_pid) {
+            should_log = true;
+        }
+        if (target_tgid > 0 && tgid == target_tgid) {
+            should_log = true;
+        }
+        
+        // 如果不匹配，跳过日志
+        if (!should_log) {
             return;
         }
     }
 
-    args->local.data0 = (uint64_t)task;
-
-    // 输出进程名和详细信息
-    printk(KERN_INFO "[KP] [%s] hook_chain_0 task: %llx, pid: %d, tgid: %d, openat dfd: %d, filename: %s, flag: %x, mode: %d\n", 
-           task->comm, task, pid, tgid, dfd, buf, flag, mode);
+    // 输出详细信息 (带PID标识)
+    if (pid_filter_enabled) {
+        printk(KERN_INFO "[KP] [PID:%d] hook_chain_0 task: %llx, pid: %d, tgid: %d, openat dfd: %d, filename: %s, flag: %x, mode: %d\n", 
+               pid, task, pid, tgid, dfd, buf, flag, mode);
+    } else {
+        printk(KERN_INFO "[KP] hook_chain_0 task: %llx, pid: %d, tgid: %d, openat dfd: %d, filename: %s, flag: %x, mode: %d\n", 
+               task, pid, tgid, dfd, buf, flag, mode);
+    }
 }
 
 uint64_t open_counts = 0;
 
 void before_openat_1(hook_fargs4_t *args, void *udata)
 {
-    // 如果 before_openat_0 因为过滤而跳过了，这里也跳过
-    if (filter_enabled && target_app[0] != '\0') {
-        struct task_struct *task = (struct task_struct *)args->local.data0;
-        const char *comm = task->comm;
-        if (!strstr(comm, target_app)) {
-            return;
-        }
+    // 如果启用了PID过滤，检查是否应该跳过
+    if (pid_filter_enabled) {
+        // 这里我们依赖 before_openat_0 的过滤结果
+        // 如果 before_openat_0 因为PID不匹配而返回，这里也不会被调用
     }
     
     uint64_t *pcount = (uint64_t *)udata;
     (*pcount)++;
-    struct task_struct *task = (struct task_struct *)args->local.data0;
-    printk(KERN_INFO "[KP] [%s] hook_chain_1 before openat task: %llx, count: %llx\n", task->comm, args->local.data0, *pcount);
+    
+    if (pid_filter_enabled) {
+        printk(KERN_INFO "[KP] [PID:?] hook_chain_1 before openat task: %llx, count: %llx\n", args->local.data0, *pcount);
+    } else {
+        printk(KERN_INFO "[KP] hook_chain_1 before openat task: %llx, count: %llx\n", args->local.data0, *pcount);
+    }
 }
 
 void after_openat_1(hook_fargs4_t *args, void *udata)
 {
-    // 如果 before_openat_0 因为过滤而跳过了，这里也跳过
-    if (filter_enabled && target_app[0] != '\0') {
-        struct task_struct *task = (struct task_struct *)args->local.data0;
-        const char *comm = task->comm;
-        if (!strstr(comm, target_app)) {
-            return;
-        }
+    if (pid_filter_enabled) {
+        printk(KERN_INFO "[KP] [PID:?] hook_chain_1 after openat task: %llx\n", args->local.data0);
+    } else {
+        printk(KERN_INFO "[KP] hook_chain_1 after openat task: %llx\n", args->local.data0);
     }
-    
-    struct task_struct *task = (struct task_struct *)args->local.data0;
-    printk(KERN_INFO "[KP] [%s] hook_chain_1 after openat task: %llx\n", task->comm, args->local.data0);
 }
 
 static long syscall_hook_demo_init(const char *args, const char *event, void *__user reserved)
@@ -200,25 +210,63 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
         printk(KERN_INFO "[KP] control: hooks removed\n");
         return 0;
         
-    } else if (!strncmp("filter:", args, 7)) {
-        // 格式: filter:app_name 或 filter:off
-        const char *filter_arg = args + 7;
-        if (!strcmp("off", filter_arg)) {
-            filter_enabled = false;
-            target_app[0] = '\0';
-            printk(KERN_INFO "[KP] control: filter disabled\n");
+    } else if (!strncmp("pid:", args, 4)) {
+        // 格式: pid:1234 或 pid:off
+        const char *pid_arg = args + 4;
+        if (!strcmp("off", pid_arg)) {
+            pid_filter_enabled = false;
+            target_pid = 0;
+            target_tgid = 0;
+            printk(KERN_INFO "[KP] control: PID filter disabled\n");
         } else {
-            filter_enabled = true;
-            strncpy(target_app, filter_arg, sizeof(target_app) - 1);
-            target_app[sizeof(target_app) - 1] = '\0';
-            printk(KERN_INFO "[KP] control: filter enabled for app: %s\n", target_app);
+            long pid_val = 0;
+            int ret = kstrtol(pid_arg, 10, &pid_val);
+            if (ret == 0 && pid_val > 0) {
+                pid_filter_enabled = true;
+                target_pid = (pid_t)pid_val;
+                target_tgid = 0;  // 只过滤PID，不过滤TGID
+                printk(KERN_INFO "[KP] control: PID filter enabled for PID: %d\n", target_pid);
+            } else {
+                printk(KERN_ERR "[KP] control: Invalid PID: %s\n", pid_arg);
+                return -1;
+            }
+        }
+        return 0;
+        
+    } else if (!strncmp("tgid:", args, 5)) {
+        // 格式: tgid:1234 或 tgid:off
+        const char *tgid_arg = args + 5;
+        if (!strcmp("off", tgid_arg)) {
+            pid_filter_enabled = false;
+            target_pid = 0;
+            target_tgid = 0;
+            printk(KERN_INFO "[KP] control: TGID filter disabled\n");
+        } else {
+            long tgid_val = 0;
+            int ret = kstrtol(tgid_arg, 10, &tgid_val);
+            if (ret == 0 && tgid_val > 0) {
+                pid_filter_enabled = true;
+                target_pid = 0;  // 只过滤TGID，不过滤PID
+                target_tgid = (pid_t)tgid_val;
+                printk(KERN_INFO "[KP] control: TGID filter enabled for TGID: %d\n", target_tgid);
+            } else {
+                printk(KERN_ERR "[KP] control: Invalid TGID: %s\n", tgid_arg);
+                return -1;
+            }
         }
         return 0;
         
     } else if (!strcmp("status", args)) {
-        printk(KERN_INFO "[KP] control: Status - Hook type: %d, Filter: %s, Target app: %s\n", 
-               hook_type, filter_enabled ? "enabled" : "disabled", 
-               target_app[0] ? target_app : "none");
+        printk(KERN_INFO "[KP] control: Status - Hook type: %d, PID filter: %s\n", 
+               hook_type, pid_filter_enabled ? "enabled" : "disabled");
+        if (pid_filter_enabled) {
+            if (target_pid > 0) {
+                printk(KERN_INFO "[KP] control: Target PID: %d\n", target_pid);
+            }
+            if (target_tgid > 0) {
+                printk(KERN_INFO "[KP] control: Target TGID: %d\n", target_tgid);
+            }
+        }
         return 0;
         
     } else {
@@ -227,8 +275,9 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
         printk(KERN_INFO "[KP] control:   function_pointer_hook - Enable function pointer hook\n");
         printk(KERN_INFO "[KP] control:   inline_hook - Enable inline hook\n");
         printk(KERN_INFO "[KP] control:   unhook - Remove all hooks\n");
-        printk(KERN_INFO "[KP] control:   filter:app_name - Filter specific app (e.g., filter:com.example.app)\n");
-        printk(KERN_INFO "[KP] control:   filter:off - Disable filter\n");
+        printk(KERN_INFO "[KP] control:   pid:1234 - Monitor specific PID\n");
+        printk(KERN_INFO "[KP] control:   tgid:1234 - Monitor specific thread group\n");
+        printk(KERN_INFO "[KP] control:   pid:off - Disable PID filter\n");
         printk(KERN_INFO "[KP] control:   status - Show current status\n");
         return -1;
     }
