@@ -23,8 +23,6 @@ KPM_DESCRIPTION("KernelPatch Module System Call Hook Example");
 const char *margs = 0;
 enum hook_type hook_type = NONE;
 
-// 移除栈回溯配置
-
 enum pid_type
 {
     PIDTYPE_PID,
@@ -35,8 +33,6 @@ enum pid_type
 };
 struct pid_namespace;
 pid_t (*__task_pid_nr_ns)(struct task_struct *task, enum pid_type type, struct pid_namespace *ns) = 0;
-
-// 移除栈回溯函数
 
 void before_openat_0(hook_fargs4_t *args, void *udata)
 {
