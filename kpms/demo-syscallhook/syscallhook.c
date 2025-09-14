@@ -17,6 +17,8 @@
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/sched/task.h>
+#include <linux/sched/mm.h>
 
 KPM_NAME("kpm-syscall-hook-demo");
 KPM_VERSION("1.0.0");
@@ -40,16 +42,9 @@ static const char *sensitive_proc_files[] = {
     NULL
 };
 
-enum pid_type
-{
-    PIDTYPE_PID,
-    PIDTYPE_TGID,
-    PIDTYPE_PGID,
-    PIDTYPE_SID,
-    PIDTYPE_MAX,
-};
-struct pid_namespace;
-pid_t (*__task_pid_nr_ns)(struct task_struct *task, enum pid_type type, struct pid_namespace *ns) = 0;
+// 内核PID函数声明（如果头文件中没有导出）
+extern pid_t task_pid_nr(struct task_struct *task);
+extern pid_t task_tgid_nr(struct task_struct *task);
 
 // 检查是否是系统应用（通过进程名称判断，不应被拦截）
 static bool is_system_app(void)
@@ -216,12 +211,8 @@ void before_openat_0(hook_fargs4_t *args, void *udata)
     compat_strncpy_from_user(buf, filename, sizeof(buf));
 
     struct task_struct *task = current;
-    pid_t pid = -1, tgid = -1;
-    
-    if (__task_pid_nr_ns) {
-        pid = __task_pid_nr_ns(task, PIDTYPE_PID, 0);
-        tgid = __task_pid_nr_ns(task, PIDTYPE_TGID, 0);
-    }
+    pid_t pid = task_pid_nr(task);
+    pid_t tgid = task_tgid_nr(task);
 
     args->local.data0 = (uint64_t)task;
 
@@ -278,8 +269,7 @@ static long syscall_hook_demo_init(const char *args, const char *event, void *__
     margs = args;
     printk(KERN_INFO "[KP] kpm-syscall-hook-demo init, args:%s\n", margs ? margs : "null");
 
-    __task_pid_nr_ns = (typeof(__task_pid_nr_ns))kallsyms_lookup_name("__task_pid_nr_ns");
-    printk(KERN_INFO "[KP] kernel function __task_pid_nr_ns addr:%llx\n", __task_pid_nr_ns);
+    // 直接使用内核提供的 task_pid_nr 和 task_tgid_nr 函数
 
     if (!margs) {
         printk(KERN_WARNING "[KP] no args specified, skip hook\n");
