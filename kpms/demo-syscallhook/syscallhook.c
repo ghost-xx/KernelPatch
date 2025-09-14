@@ -20,7 +20,7 @@
 KPM_NAME("kpm-syscall-hook-demo");
 KPM_VERSION("1.0.0");
 KPM_LICENSE("GPL v2");
-KPM_AUTHOR("GHOSTXX");
+KPM_AUTHOR("bmax121");
 KPM_DESCRIPTION("KernelPatch Module System Call Hook Example");
 
 const char *margs = 0;
