@@ -22,9 +22,6 @@ KPM_DESCRIPTION("Improved KernelPatch Module System Call Hook Example");
 const char *margs = 0;
 enum hook_type hook_type = NONE;
 
-// 保存原始hook句柄
-static void *openat_hook_handle = NULL;
-
 uint64_t open_counts = 0;
 
 void before_openat_improved(hook_fargs4_t *args, void *udata) {
@@ -68,7 +65,7 @@ static long syscall_hook_demo_init(const char *args, const char *event, void *__
 
     // Hook openat系统调用
     err = hook_syscall(__NR_openat, before_openat_improved, after_openat_improved, 
-                      HOOK_TYPE_BEFORE_AFTER, &open_counts, &openat_hook_handle);
+                      HOOK_TYPE_BEFORE_AFTER, &open_counts, NULL);
     
     if (err) {
         pr_err("hook openat error: %d\n", err);
@@ -96,11 +93,9 @@ static long syscall_hook_control0(const char *args, char *__user out_msg, int ou
 static long syscall_hook_demo_exit(void *__user reserved) {
     pr_info("kpm-syscall-hook-demo-improved exit ...\n");
     
-    // 取消hook - 使用正确的函数名
-    if (openat_hook_handle) {
-        unhook_syscalln(openat_hook_handle);  // 修正为 unhook_syscalln
-        pr_info("unhook openat success\n");
-    }
+    // 取消hook - 使用正确的参数格式
+    unhook_syscalln(__NR_openat, before_openat_improved, after_openat_improved);
+    pr_info("unhook openat success\n");
     
     pr_info("Total openat calls: %llu\n", open_counts);
     
